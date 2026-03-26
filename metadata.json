@@ -1,0 +1,5 @@
+{
+  "name": "Talkly",
+  "description": "A complete WhatsApp Web clone built with React, Tailwind CSS, and Firebase.",
+  "requestFramePermissions": []
+}
