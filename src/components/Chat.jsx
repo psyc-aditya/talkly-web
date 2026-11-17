@@ -69,10 +69,7 @@ function clampAfterSeenSeconds(val) {
 
 function getAfterSeenDurationMs(message, chatBaseSeconds = DEFAULT_AFTER_SEEN_SECONDS) {
   const baseSec = clampAfterSeenSeconds(message?.afterSeenSeconds || chatBaseSeconds);
-  const len = (message?.text || "").trim().length;
-  // Long messages get extra quiet reading time (~1s per 20 chars beyond 50 chars, up to +180s)
-  const extraReadingSec = len > 50 ? Math.min(180, Math.ceil((len - 50) / 20)) : 0;
-  return (baseSec + extraReadingSec) * 1000;
+  return baseSec * 1000;
 }
 
 function formatLastSeen(ts) {
@@ -101,7 +98,6 @@ export default function Chat() {
   const [isOtherReading, setIsOtherReading] = useState(false);
   const [chatMeta, setChatMeta] = useState(null);
   const [isTyping, setIsTyping] = useState(false);
-  const [isSelfTyping, setIsSelfTyping] = useState(false);
   const [firstUnreadId, setFirstUnreadId] = useState(null);
   const [unreadDividerCount, setUnreadDividerCount] = useState(0);
   const [isTabVisible, setIsTabVisible] = useState(
@@ -114,7 +110,6 @@ export default function Chat() {
   const [showMenu, setShowMenu] = useState(false);
   const [showDisappearOptions, setShowDisappearOptions] = useState(false);
   const [customSeenSeconds, setCustomSeenSeconds] = useState(String(DEFAULT_AFTER_SEEN_SECONDS));
-  const [bonusVersion, setBonusVersion] = useState(0);
   const [confirmAction, setConfirmAction] = useState(null); // 'clear' | 'block' | null
   const [showContactInfo, setShowContactInfo] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
@@ -130,14 +125,8 @@ export default function Chat() {
   const markingDeliveredIdsRef = useRef(new Set());
   const deletingIdsRef = useRef(new Set());
   const localReadObservedAtRef = useRef(new Map());
-  const continuationBonusRef = useRef(new Map());
-  const seenMessageIdsRef = useRef(new Set());
-  const initialMsgSnapshotDoneRef = useRef(false);
   const latestMessagesRef = useRef([]);
   const latestChatMetaRef = useRef(null);
-  const latestScheduleRef = useRef(new Map());
-  const isTypingRef = useRef(false);
-  const serverOffsetRef = useRef(0);
   const shouldInstantScrollRef = useRef(true);
   const menuRef = useRef(null);
 
@@ -188,14 +177,6 @@ export default function Chat() {
     }
   }, [chatMeta]);
 
-  useEffect(() => {
-    isTypingRef.current = isTyping || isSelfTyping;
-  }, [isTyping, isSelfTyping]);
-
-  useEffect(() => {
-    serverOffsetRef.current = serverOffsetMs;
-  }, [serverOffsetMs]);
-
   // Sync with Firebase server clock offset to eliminate local clock skew
   useEffect(() => {
     const offsetRef = rtdbRef(rtdb, ".info/serverTimeOffset");
@@ -215,13 +196,8 @@ export default function Chat() {
     markingDeliveredIdsRef.current.clear();
     deletingIdsRef.current.clear();
     localReadObservedAtRef.current.clear();
-    continuationBonusRef.current.clear();
-    seenMessageIdsRef.current.clear();
-    initialMsgSnapshotDoneRef.current = false;
     shouldInstantScrollRef.current = true;
     clearTimeout(typingTimeout.current);
-    setIsSelfTyping(false);
-    setBonusVersion(0);
     setShowMenu(false);
     setShowDisappearOptions(false);
     setConfirmAction(null);
@@ -536,9 +512,13 @@ export default function Chat() {
   }, [effectiveDisappearingMode, messages, hiddenExpiredIds, clearedAtMs]);
 
   // Compute staggered one-by-one expiration schedule for active read 'after_seen' messages
+  // Adds +5s only on continuing messages from the same sender; resets when the other user sends a message or after a break
   const afterSeenSchedule = useMemo(() => {
     const schedule = new Map();
+    const CONTINUOUS_BONUS_MS = 5000;
+    let prevReadMs = 0;
     let prevExpireMs = 0;
+    let prevSenderId = null;
 
     for (const m of messages) {
       if (
@@ -563,11 +543,24 @@ export default function Chat() {
         continue;
       }
 
-      const durationMs = getAfterSeenDurationMs(m, effectiveAfterSeenSeconds);
-      const bonusMs = continuationBonusRef.current.get(m.id) || 0;
-      const startMs = prevExpireMs > readMs ? prevExpireMs : readMs;
-      const expireAtMs = startMs + durationMs + bonusMs;
+      const baseDurationMs = getAfterSeenDurationMs(m, effectiveAfterSeenSeconds);
+      const isContinuingFromSameSender =
+        Boolean(prevSenderId) &&
+        m.senderId === prevSenderId &&
+        readMs < prevExpireMs;
+
+      const durationMs = isContinuingFromSameSender
+        ? baseDurationMs + CONTINUOUS_BONUS_MS
+        : baseDurationMs;
+
+      const isSameReadBatch = prevExpireMs > 0 && Math.abs(readMs - prevReadMs) <= 2000;
+      const expireAtMs = isSameReadBatch
+        ? Math.max(readMs + durationMs, prevExpireMs + durationMs)
+        : readMs + durationMs;
+
+      prevReadMs = readMs;
       prevExpireMs = expireAtMs;
+      prevSenderId = m.senderId || null;
 
       schedule.set(m.id, { expireAtMs, durationMs });
     }
@@ -580,67 +573,13 @@ export default function Chat() {
     effectiveDisappearingMode,
     disappearingUpdatedAtMs,
     effectiveAfterSeenSeconds,
-    bonusVersion,
-    nowMs,
   ]);
-
-  useEffect(() => {
-    latestScheduleRef.current = afterSeenSchedule;
-  }, [afterSeenSchedule]);
-
-  // Extend active 'after_seen' timers when new continuing messages arrive
-  useEffect(() => {
-    if (!messagesLoadedRef.current) return;
-
-    if (!initialMsgSnapshotDoneRef.current) {
-      messages.forEach((m) => seenMessageIdsRef.current.add(m.id));
-      initialMsgSnapshotDoneRef.current = true;
-      return;
-    }
-
-    const newlyArrived = messages.filter((m) => !seenMessageIdsRef.current.has(m.id));
-    if (newlyArrived.length === 0) return;
-
-    newlyArrived.forEach((m) => seenMessageIdsRef.current.add(m.id));
-
-    const currentServerNow = Date.now() + serverOffsetRef.current;
-    const maxCapMs = Math.max(30000, effectiveAfterSeenSeconds * 2000);
-    const stepBonusMs = Math.min(Math.max(3000, Math.round(effectiveAfterSeenSeconds * 500)), 10000);
-    let updated = false;
-
-    latestScheduleRef.current.forEach((entry, msgId) => {
-      const isNewMsg = newlyArrived.some((nm) => nm.id === msgId);
-      if (!isNewMsg && entry.expireAtMs > currentServerNow) {
-        const curBonus = continuationBonusRef.current.get(msgId) || 0;
-        if (curBonus < maxCapMs) {
-          continuationBonusRef.current.set(msgId, Math.min(maxCapMs, curBonus + stepBonusMs));
-          updated = true;
-        }
-      }
-    });
-
-    if (updated) {
-      setBonusVersion((v) => v + 1);
-    }
-  }, [messages, effectiveAfterSeenSeconds]);
 
   useEffect(() => {
     if (!hasActiveDisappearingMessages) return;
     setNowMs(Date.now());
     const interval = setInterval(() => {
-      const now = Date.now();
-      if (isTypingRef.current) {
-        const currentServerNow = now + serverOffsetRef.current;
-        latestScheduleRef.current.forEach((entry, msgId) => {
-          if (entry.expireAtMs > currentServerNow - 1500) {
-            const curBonus = continuationBonusRef.current.get(msgId) || 0;
-            if (curBonus < 60000) {
-              continuationBonusRef.current.set(msgId, curBonus + 1000);
-            }
-          }
-        });
-      }
-      setNowMs(now);
+      setNowMs(Date.now());
     }, 1000);
     return () => clearInterval(interval);
   }, [hasActiveDisappearingMessages]);
@@ -659,10 +598,9 @@ export default function Chat() {
         return false;
       }
 
-      // 1. Seen & Disappear (staggered one-by-one schedule with reading & continuation support)
+      // 1. Seen & Disappear (staggered one-by-one schedule with reading & bounded continuation support)
       const scheduleEntry = afterSeenSchedule.get(m.id);
       if (scheduleEntry) {
-        if (isTypingRef.current) return false;
         return serverNowMs >= scheduleEntry.expireAtMs;
       }
 
@@ -922,7 +860,6 @@ export default function Chat() {
 
     const myTypingRef = rtdbRef(rtdb, `typing/${data.chatId}/${currentUser.uid}`);
     set(myTypingRef, false);
-    setIsSelfTyping(false);
     clearTimeout(typingTimeout.current);
 
     const messageData = {
@@ -968,12 +905,10 @@ export default function Chat() {
 
     const myTypingRef = rtdbRef(rtdb, `typing/${data.chatId}/${currentUser.uid}`);
     set(myTypingRef, true);
-    setIsSelfTyping(true);
 
     clearTimeout(typingTimeout.current);
     typingTimeout.current = setTimeout(() => {
       set(myTypingRef, false);
-      setIsSelfTyping(false);
     }, 2000);
   };
 
@@ -1343,7 +1278,7 @@ export default function Chat() {
                                   </button>
                                 </form>
                                 <p className="text-[10px] text-amber-700/90 dark:text-amber-300/80 mt-1.5 leading-snug">
-                                  Auto-adds reading time for long messages &amp; pauses while typing.
+                                  Adds +5s on continuous messages from same user; resets when the other user replies.
                                 </p>
                               </div>
                             )}
@@ -1560,7 +1495,7 @@ export default function Chat() {
                           : chatMeta.disappearingUpdatedByName
                       }`
                     : ""}
-                  . Vanishes one-by-one ({effectiveAfterSeenSeconds}s+ by length) after seen or on exit.
+                  . Vanishes one-by-one ({effectiveAfterSeenSeconds}s) after seen or on exit.
                 </span>
               </>
             ) : (
@@ -1601,7 +1536,7 @@ export default function Chat() {
                   fallbackReadAtMs={localReadObservedAtRef.current.get(m.id)}
                   disappearDeadlineMs={scheduleEntry?.expireAtMs}
                   disappearDurationMs={scheduleEntry?.durationMs}
-                  isTimerPaused={Boolean(scheduleEntry && (isTyping || isSelfTyping))}
+                  isTimerPaused={false}
                   onEditMessage={handleEditMessage}
                   onDeleteMessage={handleDeleteMessage}
                 />
