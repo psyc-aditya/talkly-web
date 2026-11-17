@@ -63,7 +63,7 @@ export default function PublicProfile() {
   const handleMessage = async () => {
     const cleanId = (profileUser?.talklyId || talklyId || "").replace(/^@+/, "");
     if (!currentUser) {
-      navigate(`/search=@${cleanId}`);
+      navigate(`/?search=@${cleanId}`);
       return;
     }
 

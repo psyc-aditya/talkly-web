@@ -6,13 +6,36 @@ import Chat from "./components/Chat";
 import Login from "./components/Login";
 import PublicProfile from "./components/PublicProfile";
 import AppLockScreen from "./components/AppLockScreen";
+import DesktopNotificationManager from "./components/DesktopNotificationManager";
 import { useChat } from "./context/ChatContext";
 import { MessageSquare, Mail } from "lucide-react";
 import { sendEmailVerification } from "firebase/auth";
 import { auth } from "./firebase";
 
-function extractSearchQueryFromLocation(pathname, search) {
-  const decodedPath = decodeURIComponent(pathname || "");
+function extractSearchQueryFromLocation(pathname, search, hash) {
+  const safeDecode = (val) => {
+    try {
+      return decodeURIComponent(val || "");
+    } catch {
+      return val || "";
+    }
+  };
+
+  const params = new URLSearchParams(search || "");
+  const queryParam = params.get("search") || params.get("u") || params.get("profile");
+  if (queryParam && queryParam.trim()) {
+    return queryParam.trim();
+  }
+
+  const decodedHash = safeDecode(hash).replace(/^#/, "");
+  if (decodedHash) {
+    const hashQuery = decodedHash.replace(/^\//, "");
+    if (hashQuery.startsWith("search=")) return hashQuery.slice("search=".length).trim();
+    if (hashQuery.startsWith("u/")) return hashQuery.slice("u/".length).trim();
+    if (hashQuery.startsWith("profile=")) return hashQuery.slice("profile=".length).trim();
+  }
+
+  const decodedPath = safeDecode(pathname);
   if (decodedPath.startsWith("/search=")) {
     return decodedPath.slice("/search=".length).trim();
   }
@@ -22,25 +45,22 @@ function extractSearchQueryFromLocation(pathname, search) {
   if (decodedPath.startsWith("/search/")) {
     return decodedPath.slice("/search/".length).trim();
   }
-  const params = new URLSearchParams(search || "");
-  const q = params.get("search");
-  return q ? q.trim() : "";
+
+  return "";
 }
 
-function SearchLinkCapture() {
-  const location = useLocation();
+function SearchLinkCapture({ query }) {
   const { dispatch } = useChat();
-  const extracted = extractSearchQueryFromLocation(location.pathname, location.search);
 
   useEffect(() => {
-    if (!extracted) return;
+    if (!query) return;
     try {
-      localStorage.setItem("talkly_pending_search", extracted);
+      localStorage.setItem("talkly_pending_search", query);
     } catch {
       // ignore storage errors
     }
-    dispatch({ type: "SET_PENDING_SEARCH", payload: extracted });
-  }, [extracted, dispatch]);
+    dispatch({ type: "SET_PENDING_SEARCH", payload: query });
+  }, [query, dispatch]);
 
   return <Navigate to="/" replace />;
 }
@@ -52,7 +72,7 @@ function MainApp() {
   const location = useLocation();
 
   useEffect(() => {
-    const q = extractSearchQueryFromLocation(location.pathname, location.search);
+    const q = extractSearchQueryFromLocation(location.pathname, location.search, location.hash);
     if (q) {
       try {
         localStorage.setItem("talkly_pending_search", q);
@@ -61,7 +81,7 @@ function MainApp() {
       }
       dispatch({ type: "SET_PENDING_SEARCH", payload: q });
     }
-  }, [location.pathname, location.search, dispatch]);
+  }, [location.pathname, location.search, location.hash, dispatch]);
 
   if (currentUser && !currentUser.emailVerified) {
     return (
@@ -100,52 +120,59 @@ function MainApp() {
     );
   }
 
-  if (isAppLocked) {
-    return <AppLockScreen />;
-  }
-
   return (
-    <div className="h-screen w-screen bg-white dark:bg-gray-900 flex overflow-hidden transition-colors duration-200">
-      {/* Sidebar - Hidden on mobile if a chat is selected */}
-      <div className={`w-full md:w-[350px] lg:w-[400px] h-full flex-shrink-0 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 ${data.isMobileView ? 'hidden md:flex' : 'flex'}`}>
-        <Sidebar />
-      </div>
-
-      {/* Chat Area - Hidden on mobile if no chat is selected */}
-      <div className={`w-full md:flex-1 h-full bg-gray-50 dark:bg-gray-950 relative ${!data.isMobileView ? 'hidden md:flex' : 'flex'}`}>
-        {data.chatId === "null" ? (
-          <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
-            <div className="bg-blue-100 dark:bg-blue-900/30 p-6 rounded-full mb-6">
-              <MessageSquare className="w-16 h-16 text-blue-600 dark:text-blue-400" />
-            </div>
-            <h1 className="text-3xl font-semibold text-gray-800 dark:text-gray-100 mb-3">Welcome to Talkly</h1>
-            <p className="text-gray-500 dark:text-gray-400 text-base max-w-md text-center px-4">
-              Select a contact from the sidebar to start chatting, or search for new people to connect with.
-            </p>
+    <>
+      <DesktopNotificationManager />
+      {isAppLocked ? (
+        <AppLockScreen />
+      ) : (
+        <div className="h-screen w-screen bg-white dark:bg-gray-900 flex overflow-hidden transition-colors duration-200">
+          {/* Sidebar - Hidden on mobile if a chat is selected */}
+          <div className={`w-full md:w-[350px] lg:w-[400px] h-full flex-shrink-0 border-r border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 ${data.isMobileView ? 'hidden md:flex' : 'flex'}`}>
+            <Sidebar />
           </div>
-        ) : (
-          <Chat />
-        )}
-      </div>
-    </div>
+
+          {/* Chat Area - Hidden on mobile if no chat is selected */}
+          <div className={`w-full md:flex-1 h-full bg-gray-50 dark:bg-gray-950 relative ${!data.isMobileView ? 'hidden md:flex' : 'flex'}`}>
+            {data.chatId === "null" ? (
+              <div className="w-full h-full flex flex-col items-center justify-center bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
+                <div className="bg-blue-100 dark:bg-blue-900/30 p-6 rounded-full mb-6">
+                  <MessageSquare className="w-16 h-16 text-blue-600 dark:text-blue-400" />
+                </div>
+                <h1 className="text-3xl font-semibold text-gray-800 dark:text-gray-100 mb-3">Welcome to Talkly</h1>
+                <p className="text-gray-500 dark:text-gray-400 text-base max-w-md text-center px-4">
+                  Select a contact from the sidebar to start chatting, or search for new people to connect with.
+                </p>
+              </div>
+            ) : (
+              <Chat />
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
 function App() {
   const { currentUser } = useAuth();
   const location = useLocation();
-  const hasSearchRoute = Boolean(extractSearchQueryFromLocation(location.pathname, location.search));
+  const extractedQuery = extractSearchQueryFromLocation(
+    location.pathname,
+    location.search,
+    location.hash
+  );
 
-  if (hasSearchRoute && location.pathname !== "/") {
-    return <SearchLinkCapture />;
+  if (extractedQuery) {
+    return <SearchLinkCapture query={extractedQuery} />;
   }
 
   return (
     <Routes>
       <Route path="/u/:talklyId" element={<PublicProfile />} />
-      <Route 
-        path="/" 
-        element={currentUser ? <MainApp /> : <Login />} 
+      <Route
+        path="/"
+        element={currentUser ? <MainApp /> : <Login />}
       />
       <Route path="*" element={<Navigate to="/" />} />
     </Routes>

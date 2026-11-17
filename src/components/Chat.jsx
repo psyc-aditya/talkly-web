@@ -38,9 +38,18 @@ import Message from "./Message";
 import EmojiPicker, { Theme as EmojiTheme } from "emoji-picker-react";
 import { handleFirestoreError, OperationType } from "../utils/errorHandler";
 
+const DEFAULT_AFTER_SEEN_SECONDS = 10;
+const MIN_AFTER_SEEN_SECONDS = 3;
+const MAX_AFTER_SEEN_SECONDS = 300;
+const PRESET_AFTER_SEEN_SECONDS = [5, 10, 15, 30, 60];
+
 const DISAPPEAR_OPTIONS = [
   { id: "off", label: "Off", desc: "Messages stay in chat" },
-  { id: "after_seen", label: "Seen & Disappear", desc: "Vanishes 10s after seen or on exit" },
+  {
+    id: "after_seen",
+    label: "Seen & Disappear",
+    desc: "Vanishes one-by-one after seen or on exit",
+  },
   { id: "1h", label: "1 Hour", desc: "Disappears 1 hour after sending" },
   { id: "24h", label: "24 Hours", desc: "Disappears 24 hours after sending" },
   { id: "7d", label: "7 Days", desc: "Disappears 7 days after sending" },
@@ -52,7 +61,19 @@ const DURATION_MAP_MS = {
   "7d": 7 * 24 * 60 * 60 * 1000,
 };
 
-const AFTER_SEEN_MS = 10000;
+function clampAfterSeenSeconds(val) {
+  const n = Math.round(Number(val));
+  if (!Number.isFinite(n)) return DEFAULT_AFTER_SEEN_SECONDS;
+  return Math.max(MIN_AFTER_SEEN_SECONDS, Math.min(MAX_AFTER_SEEN_SECONDS, n));
+}
+
+function getAfterSeenDurationMs(message, chatBaseSeconds = DEFAULT_AFTER_SEEN_SECONDS) {
+  const baseSec = clampAfterSeenSeconds(message?.afterSeenSeconds || chatBaseSeconds);
+  const len = (message?.text || "").trim().length;
+  // Long messages get extra quiet reading time (~1s per 20 chars beyond 50 chars, up to +180s)
+  const extraReadingSec = len > 50 ? Math.min(180, Math.ceil((len - 50) / 20)) : 0;
+  return (baseSec + extraReadingSec) * 1000;
+}
 
 function formatLastSeen(ts) {
   if (!ts || typeof ts !== "number") return "Offline";
@@ -80,6 +101,7 @@ export default function Chat() {
   const [isOtherReading, setIsOtherReading] = useState(false);
   const [chatMeta, setChatMeta] = useState(null);
   const [isTyping, setIsTyping] = useState(false);
+  const [isSelfTyping, setIsSelfTyping] = useState(false);
   const [firstUnreadId, setFirstUnreadId] = useState(null);
   const [unreadDividerCount, setUnreadDividerCount] = useState(0);
   const [isTabVisible, setIsTabVisible] = useState(
@@ -91,6 +113,8 @@ export default function Chat() {
 
   const [showMenu, setShowMenu] = useState(false);
   const [showDisappearOptions, setShowDisappearOptions] = useState(false);
+  const [customSeenSeconds, setCustomSeenSeconds] = useState(String(DEFAULT_AFTER_SEEN_SECONDS));
+  const [bonusVersion, setBonusVersion] = useState(0);
   const [confirmAction, setConfirmAction] = useState(null); // 'clear' | 'block' | null
   const [showContactInfo, setShowContactInfo] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
@@ -106,12 +130,20 @@ export default function Chat() {
   const markingDeliveredIdsRef = useRef(new Set());
   const deletingIdsRef = useRef(new Set());
   const localReadObservedAtRef = useRef(new Map());
+  const continuationBonusRef = useRef(new Map());
+  const seenMessageIdsRef = useRef(new Set());
+  const initialMsgSnapshotDoneRef = useRef(false);
   const latestMessagesRef = useRef([]);
   const latestChatMetaRef = useRef(null);
+  const latestScheduleRef = useRef(new Map());
+  const isTypingRef = useRef(false);
+  const serverOffsetRef = useRef(0);
+  const shouldInstantScrollRef = useRef(true);
   const menuRef = useRef(null);
 
   const effectiveDisappearingMode =
     chatMeta?.disappearingMode || (chatMeta?.disappearing ? "24h" : "off");
+  const effectiveAfterSeenSeconds = clampAfterSeenSeconds(chatMeta?.afterSeenSeconds);
 
   const showToast = (msg) => {
     setToastMsg(msg);
@@ -151,11 +183,18 @@ export default function Chat() {
 
   useEffect(() => {
     latestChatMetaRef.current = chatMeta;
+    if (chatMeta?.afterSeenSeconds) {
+      setCustomSeenSeconds(String(clampAfterSeenSeconds(chatMeta.afterSeenSeconds)));
+    }
   }, [chatMeta]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length]);
+    isTypingRef.current = isTyping || isSelfTyping;
+  }, [isTyping, isSelfTyping]);
+
+  useEffect(() => {
+    serverOffsetRef.current = serverOffsetMs;
+  }, [serverOffsetMs]);
 
   // Sync with Firebase server clock offset to eliminate local clock skew
   useEffect(() => {
@@ -176,6 +215,13 @@ export default function Chat() {
     markingDeliveredIdsRef.current.clear();
     deletingIdsRef.current.clear();
     localReadObservedAtRef.current.clear();
+    continuationBonusRef.current.clear();
+    seenMessageIdsRef.current.clear();
+    initialMsgSnapshotDoneRef.current = false;
+    shouldInstantScrollRef.current = true;
+    clearTimeout(typingTimeout.current);
+    setIsSelfTyping(false);
+    setBonusVersion(0);
     setShowMenu(false);
     setShowDisappearOptions(false);
     setConfirmAction(null);
@@ -262,21 +308,37 @@ export default function Chat() {
   };
 
   // Disappearing mode handler
-  const handleSetDisappearingMode = async (mode) => {
+  const handleSetDisappearingMode = async (mode, customSecondsOverride = null) => {
     try {
+      const nextSeconds =
+        mode === "after_seen"
+          ? clampAfterSeenSeconds(customSecondsOverride ?? effectiveAfterSeenSeconds)
+          : effectiveAfterSeenSeconds;
+
       await updateDoc(doc(db, "chats", data.chatId), {
         disappearing: mode !== "off",
         disappearingMode: mode,
+        ...(mode === "after_seen" ? { afterSeenSeconds: nextSeconds } : {}),
         disappearingUpdatedAt: serverTimestamp(),
         disappearingUpdatedBy: currentUser.uid,
         disappearingUpdatedByName: currentUser.displayName || "Someone",
       });
-      setShowDisappearOptions(false);
-      setShowMenu(false);
+      if (mode === "after_seen") {
+        setCustomSeenSeconds(String(nextSeconds));
+      }
+      if (customSecondsOverride === null && mode !== "after_seen") {
+        setShowDisappearOptions(false);
+        setShowMenu(false);
+      } else if (customSecondsOverride !== null) {
+        setShowDisappearOptions(false);
+        setShowMenu(false);
+      }
       const selected = DISAPPEAR_OPTIONS.find((o) => o.id === mode);
       showToast(
         mode === "off"
           ? "Disappearing messages turned off."
+          : mode === "after_seen"
+          ? `Seen & Disappear set to ${nextSeconds}s.`
           : `${selected?.label} enabled for this chat.`
       );
     } catch (error) {
@@ -391,8 +453,13 @@ export default function Chat() {
             status: "read",
             readAt: serverTimestamp(),
           };
-          if (effectiveDisappearingMode === "after_seen" && !m.disappearMode) {
-            payload.disappearMode = "after_seen";
+          if (effectiveDisappearingMode === "after_seen") {
+            if (!m.disappearMode) {
+              payload.disappearMode = "after_seen";
+            }
+            if (!m.afterSeenSeconds) {
+              payload.afterSeenSeconds = effectiveAfterSeenSeconds;
+            }
           }
           batch.update(msgRef, payload);
         });
@@ -451,8 +518,12 @@ export default function Chat() {
     serverOffsetMs,
   ]);
 
-  // 1-second ticker for disappearing / Seen & Disappear messages
+  // 1-second ticker & staggered one-by-one schedule for disappearing / Seen & Disappear messages
   const clearedAtMs = chatMeta?.clearedAt?.toMillis ? chatMeta.clearedAt.toMillis() : 0;
+  const disappearingUpdatedAtMs = chatMeta?.disappearingUpdatedAt?.toMillis
+    ? chatMeta.disappearingUpdatedAt.toMillis()
+    : 0;
+
   const hasActiveDisappearingMessages = useMemo(() => {
     const activeMsgs = messages.filter(
       (m) =>
@@ -464,11 +535,112 @@ export default function Chat() {
     return activeMsgs.some((m) => m.disappearMode === "after_seen");
   }, [effectiveDisappearingMode, messages, hiddenExpiredIds, clearedAtMs]);
 
+  // Compute staggered one-by-one expiration schedule for active read 'after_seen' messages
+  const afterSeenSchedule = useMemo(() => {
+    const schedule = new Map();
+    let prevExpireMs = 0;
+
+    for (const m of messages) {
+      if (
+        m.expired ||
+        hiddenExpiredIds.has(m.id) ||
+        (clearedAtMs && m.timestamp?.toMillis && m.timestamp.toMillis() <= clearedAtMs)
+      ) {
+        continue;
+      }
+
+      const readMs = m.readAt?.toMillis
+        ? m.readAt.toMillis()
+        : localReadObservedAtRef.current.get(m.id);
+
+      const isAfterSeenMsg =
+        m.disappearMode === "after_seen" ||
+        (effectiveDisappearingMode === "after_seen" &&
+          m.status === "read" &&
+          (!disappearingUpdatedAtMs || (readMs || 0) >= disappearingUpdatedAtMs - 2000));
+
+      if (!isAfterSeenMsg || m.status !== "read" || !readMs) {
+        continue;
+      }
+
+      const durationMs = getAfterSeenDurationMs(m, effectiveAfterSeenSeconds);
+      const bonusMs = continuationBonusRef.current.get(m.id) || 0;
+      const startMs = prevExpireMs > readMs ? prevExpireMs : readMs;
+      const expireAtMs = startMs + durationMs + bonusMs;
+      prevExpireMs = expireAtMs;
+
+      schedule.set(m.id, { expireAtMs, durationMs });
+    }
+
+    return schedule;
+  }, [
+    messages,
+    hiddenExpiredIds,
+    clearedAtMs,
+    effectiveDisappearingMode,
+    disappearingUpdatedAtMs,
+    effectiveAfterSeenSeconds,
+    bonusVersion,
+    nowMs,
+  ]);
+
+  useEffect(() => {
+    latestScheduleRef.current = afterSeenSchedule;
+  }, [afterSeenSchedule]);
+
+  // Extend active 'after_seen' timers when new continuing messages arrive
+  useEffect(() => {
+    if (!messagesLoadedRef.current) return;
+
+    if (!initialMsgSnapshotDoneRef.current) {
+      messages.forEach((m) => seenMessageIdsRef.current.add(m.id));
+      initialMsgSnapshotDoneRef.current = true;
+      return;
+    }
+
+    const newlyArrived = messages.filter((m) => !seenMessageIdsRef.current.has(m.id));
+    if (newlyArrived.length === 0) return;
+
+    newlyArrived.forEach((m) => seenMessageIdsRef.current.add(m.id));
+
+    const currentServerNow = Date.now() + serverOffsetRef.current;
+    const maxCapMs = Math.max(30000, effectiveAfterSeenSeconds * 2000);
+    const stepBonusMs = Math.min(Math.max(3000, Math.round(effectiveAfterSeenSeconds * 500)), 10000);
+    let updated = false;
+
+    latestScheduleRef.current.forEach((entry, msgId) => {
+      const isNewMsg = newlyArrived.some((nm) => nm.id === msgId);
+      if (!isNewMsg && entry.expireAtMs > currentServerNow) {
+        const curBonus = continuationBonusRef.current.get(msgId) || 0;
+        if (curBonus < maxCapMs) {
+          continuationBonusRef.current.set(msgId, Math.min(maxCapMs, curBonus + stepBonusMs));
+          updated = true;
+        }
+      }
+    });
+
+    if (updated) {
+      setBonusVersion((v) => v + 1);
+    }
+  }, [messages, effectiveAfterSeenSeconds]);
+
   useEffect(() => {
     if (!hasActiveDisappearingMessages) return;
     setNowMs(Date.now());
     const interval = setInterval(() => {
-      setNowMs(Date.now());
+      const now = Date.now();
+      if (isTypingRef.current) {
+        const currentServerNow = now + serverOffsetRef.current;
+        latestScheduleRef.current.forEach((entry, msgId) => {
+          if (entry.expireAtMs > currentServerNow - 1500) {
+            const curBonus = continuationBonusRef.current.get(msgId) || 0;
+            if (curBonus < 60000) {
+              continuationBonusRef.current.set(msgId, curBonus + 1000);
+            }
+          }
+        });
+      }
+      setNowMs(now);
     }, 1000);
     return () => clearInterval(interval);
   }, [hasActiveDisappearingMessages]);
@@ -480,27 +652,18 @@ export default function Chat() {
     if (data.chatId === "null" || messages.length === 0) return;
 
     const toDelete = messages.filter((m) => {
-      if (deletingIdsRef.current.has(m.id) || m.expired) return false;
-
-      const isAfterSeenMsg =
-        m.disappearMode === "after_seen" ||
-        (effectiveDisappearingMode === "after_seen" &&
-          m.status === "read" &&
-          (!chatMeta?.disappearingUpdatedAt?.toMillis ||
-            (m.readAt?.toMillis?.() || localReadObservedAtRef.current.get(m.id) || 0) >=
-              chatMeta.disappearingUpdatedAt.toMillis() - 2000));
-
-      // 1. Seen & Disappear (10s after seen)
-      if (isAfterSeenMsg) {
-        if (m.status === "read") {
-          const readMs = m.readAt?.toMillis
-            ? m.readAt.toMillis()
-            : localReadObservedAtRef.current.get(m.id);
-          if (readMs) {
-            return serverNowMs - readMs >= AFTER_SEEN_MS;
-          }
-        }
+      if (deletingIdsRef.current.has(m.id) || m.expired || hiddenExpiredIds.has(m.id)) {
         return false;
+      }
+      if (clearedAtMs && m.timestamp?.toMillis && m.timestamp.toMillis() <= clearedAtMs) {
+        return false;
+      }
+
+      // 1. Seen & Disappear (staggered one-by-one schedule with reading & continuation support)
+      const scheduleEntry = afterSeenSchedule.get(m.id);
+      if (scheduleEntry) {
+        if (isTypingRef.current) return false;
+        return serverNowMs >= scheduleEntry.expireAtMs;
       }
 
       // 2. Time-based disappearing modes (1h, 24h, 7d)
@@ -520,11 +683,15 @@ export default function Chat() {
     persistExpiredIds(data.chatId, expiredIds);
 
     const deleteIdsSet = new Set(expiredIds);
-    const remaining = messages.filter(
-      (m) => !deleteIdsSet.has(m.id) && !m.expired && !hiddenExpiredIds.has(m.id)
+    const visibleBeforeDelete = messages.filter(
+      (m) =>
+        !m.expired &&
+        !hiddenExpiredIds.has(m.id) &&
+        !(clearedAtMs && m.timestamp?.toMillis && m.timestamp.toMillis() <= clearedAtMs)
     );
-    const lastOriginal = messages[messages.length - 1];
-    const lastWasDeleted = lastOriginal && deleteIdsSet.has(lastOriginal.id);
+    const remaining = visibleBeforeDelete.filter((m) => !deleteIdsSet.has(m.id));
+    const lastVisible = visibleBeforeDelete[visibleBeforeDelete.length - 1];
+    const lastWasDeleted = lastVisible && deleteIdsSet.has(lastVisible.id);
 
     const syncLastMessage = async () => {
       if (!lastWasDeleted) return;
@@ -538,9 +705,9 @@ export default function Chat() {
             }
           : {
               text: "Message disappeared",
-              senderId: lastOriginal.senderId,
+              senderId: lastVisible.senderId,
               disappeared: true,
-              status: lastOriginal.status || "read",
+              status: lastVisible.status || "read",
             },
       }).catch(() => {});
     };
@@ -580,9 +747,10 @@ export default function Chat() {
   }, [
     serverNowMs,
     messages,
+    afterSeenSchedule,
     effectiveDisappearingMode,
     data.chatId,
-    chatMeta?.disappearingUpdatedAt,
+    clearedAtMs,
     currentUser.uid,
     hiddenExpiredIds,
   ]);
@@ -754,6 +922,7 @@ export default function Chat() {
 
     const myTypingRef = rtdbRef(rtdb, `typing/${data.chatId}/${currentUser.uid}`);
     set(myTypingRef, false);
+    setIsSelfTyping(false);
     clearTimeout(typingTimeout.current);
 
     const messageData = {
@@ -764,6 +933,9 @@ export default function Chat() {
       timestamp: serverTimestamp(),
       status: "sent",
       ...(effectiveDisappearingMode !== "off" ? { disappearMode: effectiveDisappearingMode } : {}),
+      ...(effectiveDisappearingMode === "after_seen"
+        ? { afterSeenSeconds: effectiveAfterSeenSeconds }
+        : {}),
     };
 
     setText("");
@@ -796,10 +968,12 @@ export default function Chat() {
 
     const myTypingRef = rtdbRef(rtdb, `typing/${data.chatId}/${currentUser.uid}`);
     set(myTypingRef, true);
+    setIsSelfTyping(true);
 
     clearTimeout(typingTimeout.current);
     typingTimeout.current = setTimeout(() => {
       set(myTypingRef, false);
+      setIsSelfTyping(false);
     }, 2000);
   };
 
@@ -901,6 +1075,14 @@ export default function Chat() {
     [messages, hiddenExpiredIds, clearedAtMs, searchQuery]
   );
 
+  // Start at bottom on chat open and scroll down smoothly on new messages
+  useEffect(() => {
+    if (!endRef.current || filteredMessages.length === 0) return;
+    const behavior = shouldInstantScrollRef.current ? "auto" : "smooth";
+    endRef.current.scrollIntoView({ behavior, block: "end" });
+    shouldInstantScrollRef.current = false;
+  }, [filteredMessages.length, data.chatId]);
+
   const lastOutgoingId = useMemo(() => {
     for (let i = filteredMessages.length - 1; i >= 0; i--) {
       if (filteredMessages[i].senderId === currentUser.uid) {
@@ -911,7 +1093,9 @@ export default function Chat() {
   }, [filteredMessages, currentUser.uid]);
 
   const activeDisappearLabel =
-    DISAPPEAR_OPTIONS.find((o) => o.id === effectiveDisappearingMode)?.label || "Off";
+    effectiveDisappearingMode === "after_seen"
+      ? `Seen & Disappear (${effectiveAfterSeenSeconds}s)`
+      : DISAPPEAR_OPTIONS.find((o) => o.id === effectiveDisappearingMode)?.label || "Off";
 
   return (
     <div className="flex flex-col w-full h-full bg-white dark:bg-gray-900 relative transition-colors duration-200">
@@ -1069,7 +1253,7 @@ export default function Chat() {
               </button>
 
               {showMenu && (
-                <div className="absolute right-0 top-12 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 shadow-xl rounded-xl py-2 w-64 z-50 overflow-hidden">
+                <div className="absolute right-0 top-12 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 shadow-xl rounded-xl py-2 w-72 z-50 overflow-hidden">
                   <div className="px-4 py-2 border-b border-gray-100 dark:border-gray-700 mb-1 flex items-center justify-between">
                     <p className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       {showDisappearOptions ? "Disappearing Mode" : "Chat Settings"}
@@ -1090,29 +1274,80 @@ export default function Chat() {
                       {DISAPPEAR_OPTIONS.map((opt) => {
                         const isActive = effectiveDisappearingMode === opt.id;
                         return (
-                          <button
-                            key={opt.id}
-                            type="button"
-                            onClick={() => handleSetDisappearingMode(opt.id)}
-                            className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between gap-2 ${
-                              isActive
-                                ? "bg-blue-50/80 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
-                                : "text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-                            }`}
-                          >
-                            <div className="flex flex-col">
-                              <span className="font-medium flex items-center gap-1.5">
-                                {opt.id === "after_seen" && (
-                                  <Flame className="w-3.5 h-3.5 text-amber-500" />
-                                )}
-                                {opt.label}
-                              </span>
-                              <span className="text-[11px] text-gray-500 dark:text-gray-400">
-                                {opt.desc}
-                              </span>
-                            </div>
-                            {isActive && <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />}
-                          </button>
+                          <div key={opt.id}>
+                            <button
+                              type="button"
+                              onClick={() => handleSetDisappearingMode(opt.id)}
+                              className={`w-full text-left px-4 py-2.5 text-sm transition-colors flex items-center justify-between gap-2 ${
+                                isActive
+                                  ? "bg-blue-50/80 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300"
+                                  : "text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
+                              }`}
+                            >
+                              <div className="flex flex-col">
+                                <span className="font-medium flex items-center gap-1.5">
+                                  {opt.id === "after_seen" && (
+                                    <Flame className="w-3.5 h-3.5 text-amber-500" />
+                                  )}
+                                  {opt.label}
+                                </span>
+                                <span className="text-[11px] text-gray-500 dark:text-gray-400">
+                                  {opt.desc}
+                                </span>
+                              </div>
+                              {isActive && <Check className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0" />}
+                            </button>
+
+                            {opt.id === "after_seen" && isActive && (
+                              <div className="px-4 py-2.5 bg-amber-50/60 dark:bg-amber-950/20 border-y border-amber-200/50 dark:border-amber-800/40">
+                                <p className="text-[11px] font-semibold text-amber-800 dark:text-amber-300 mb-1.5">
+                                  Disappear time per message (sec)
+                                </p>
+                                <div className="flex flex-wrap gap-1.5 mb-2">
+                                  {PRESET_AFTER_SEEN_SECONDS.map((sec) => (
+                                    <button
+                                      key={sec}
+                                      type="button"
+                                      onClick={() => handleSetDisappearingMode("after_seen", sec)}
+                                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
+                                        effectiveAfterSeenSeconds === sec
+                                          ? "bg-amber-500 text-white"
+                                          : "bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-amber-100 dark:hover:bg-gray-700"
+                                      }`}
+                                    >
+                                      {sec}s
+                                    </button>
+                                  ))}
+                                </div>
+                                <form
+                                  onSubmit={(e) => {
+                                    e.preventDefault();
+                                    handleSetDisappearingMode("after_seen", customSeenSeconds);
+                                  }}
+                                  className="flex items-center gap-1.5"
+                                >
+                                  <input
+                                    type="number"
+                                    min={MIN_AFTER_SEEN_SECONDS}
+                                    max={MAX_AFTER_SEEN_SECONDS}
+                                    value={customSeenSeconds}
+                                    onChange={(e) => setCustomSeenSeconds(e.target.value)}
+                                    className="w-20 px-2 py-1 text-xs rounded-md bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-900 dark:text-gray-100 outline-none focus:border-amber-500"
+                                    placeholder="Sec"
+                                  />
+                                  <button
+                                    type="submit"
+                                    className="px-2.5 py-1 text-xs font-medium rounded-md bg-amber-600 hover:bg-amber-700 text-white transition-colors"
+                                  >
+                                    Set
+                                  </button>
+                                </form>
+                                <p className="text-[10px] text-amber-700/90 dark:text-amber-300/80 mt-1.5 leading-snug">
+                                  Auto-adds reading time for long messages &amp; pauses while typing.
+                                </p>
+                              </div>
+                            )}
+                          </div>
                         );
                       })}
                     </div>
@@ -1303,68 +1538,76 @@ export default function Chat() {
         </div>
       )}
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-8 flex flex-col gap-2 bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
-        <div className="z-10 flex flex-col gap-2">
-          {effectiveDisappearingMode !== "off" && (
-            <div className="flex justify-center my-2">
-              <span
-                className={`inline-flex items-center gap-1.5 text-xs font-medium px-4 py-1.5 rounded-full text-center ${
-                  effectiveDisappearingMode === "after_seen"
-                    ? "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 border border-amber-200/80 dark:border-amber-700/50"
-                    : "bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
-                }`}
-              >
-                {effectiveDisappearingMode === "after_seen" ? (
-                  <>
-                    <Flame className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
-                    <span>
-                      Seen &amp; Disappear enabled
-                      {chatMeta?.disappearingUpdatedByName
-                        ? ` by ${
-                            chatMeta.disappearingUpdatedBy === currentUser.uid
-                              ? "you"
-                              : chatMeta.disappearingUpdatedByName
-                          }`
-                        : ""}
-                      . Messages vanish 10s after being seen or on exit.
-                    </span>
-                  </>
-                ) : (
-                  <>
-                    <Timer className="w-3.5 h-3.5 shrink-0" />
-                    <span>
-                      Disappearing messages enabled ({activeDisappearLabel}). New &amp; active messages vanish automatically.
-                    </span>
-                  </>
-                )}
-              </span>
-            </div>
-          )}
+      {/* Top System Notice for Disappearing / Seen & Disappear Mode */}
+      {effectiveDisappearingMode !== "off" && (
+        <div className="bg-gray-50 dark:bg-gray-950 px-4 pt-3 pb-1 flex justify-center shrink-0 z-10 transition-colors duration-200">
+          <span
+            className={`inline-flex items-center gap-1.5 text-xs font-medium px-4 py-1.5 rounded-full text-center ${
+              effectiveDisappearingMode === "after_seen"
+                ? "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 border border-amber-200/80 dark:border-amber-700/50"
+                : "bg-gray-200 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
+            }`}
+          >
+            {effectiveDisappearingMode === "after_seen" ? (
+              <>
+                <Flame className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>
+                  Seen &amp; Disappear enabled
+                  {chatMeta?.disappearingUpdatedByName
+                    ? ` by ${
+                        chatMeta.disappearingUpdatedBy === currentUser.uid
+                          ? "you"
+                          : chatMeta.disappearingUpdatedByName
+                      }`
+                    : ""}
+                  . Vanishes one-by-one ({effectiveAfterSeenSeconds}s+ by length) after seen or on exit.
+                </span>
+              </>
+            ) : (
+              <>
+                <Timer className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Disappearing messages enabled ({activeDisappearLabel}). New &amp; active messages vanish automatically.
+                </span>
+              </>
+            )}
+          </span>
+        </div>
+      )}
 
-          {filteredMessages.map((m) => (
-            <div key={m.id} className="flex flex-col">
-              {m.id === firstUnreadId && !searchQuery && unreadDividerCount > 0 && (
-                <div className="flex items-center gap-3 my-4">
-                  <div className="flex-1 h-px bg-blue-200 dark:bg-blue-800/60" />
-                  <span className="bg-blue-100 text-blue-800 text-xs font-semibold px-3 py-1 rounded-full dark:bg-blue-900/60 dark:text-blue-300 shadow-xs">
-                    {unreadDividerCount}{" "}
-                    {unreadDividerCount === 1 ? "Unread Message" : "Unread Messages"}
-                  </span>
-                  <div className="flex-1 h-px bg-blue-200 dark:bg-blue-800/60" />
-                </div>
-              )}
-              <Message
-                message={m}
-                isLastOutgoing={m.id === lastOutgoingId}
-                disappearingMode={effectiveDisappearingMode}
-                nowMs={serverNowMs}
-                fallbackReadAtMs={localReadObservedAtRef.current.get(m.id)}
-                onEditMessage={handleEditMessage}
-                onDeleteMessage={handleDeleteMessage}
-              />
-            </div>
-          ))}
+      {/* Messages (bottom-aligned, growing upward) */}
+      <div className="flex-1 overflow-y-auto p-4 md:p-8 flex flex-col bg-gray-50 dark:bg-gray-950 transition-colors duration-200">
+        <div className="z-10 flex flex-col gap-2 mt-auto">
+
+          {filteredMessages.map((m) => {
+            const scheduleEntry = afterSeenSchedule.get(m.id);
+            return (
+              <div key={m.id} className="flex flex-col">
+                {m.id === firstUnreadId && !searchQuery && unreadDividerCount > 0 && (
+                  <div className="flex items-center gap-3 my-4">
+                    <div className="flex-1 h-px bg-blue-200 dark:bg-blue-800/60" />
+                    <span className="bg-blue-100 text-blue-800 text-xs font-semibold px-3 py-1 rounded-full dark:bg-blue-900/60 dark:text-blue-300 shadow-xs">
+                      {unreadDividerCount}{" "}
+                      {unreadDividerCount === 1 ? "Unread Message" : "Unread Messages"}
+                    </span>
+                    <div className="flex-1 h-px bg-blue-200 dark:bg-blue-800/60" />
+                  </div>
+                )}
+                <Message
+                  message={m}
+                  isLastOutgoing={m.id === lastOutgoingId}
+                  disappearingMode={effectiveDisappearingMode}
+                  nowMs={serverNowMs}
+                  fallbackReadAtMs={localReadObservedAtRef.current.get(m.id)}
+                  disappearDeadlineMs={scheduleEntry?.expireAtMs}
+                  disappearDurationMs={scheduleEntry?.durationMs}
+                  isTimerPaused={Boolean(scheduleEntry && (isTyping || isSelfTyping))}
+                  onEditMessage={handleEditMessage}
+                  onDeleteMessage={handleDeleteMessage}
+                />
+              </div>
+            );
+          })}
 
           {searchQuery && filteredMessages.length === 0 && (
             <div className="text-center text-gray-500 dark:text-gray-400 mt-4 text-sm">

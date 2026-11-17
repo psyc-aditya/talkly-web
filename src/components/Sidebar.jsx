@@ -40,9 +40,23 @@ import {
   Lock,
   Eye,
   EyeOff,
+  Bell,
+  BellOff,
+  Copy,
+  QrCode,
 } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { handleFirestoreError, OperationType } from "../utils/errorHandler";
 import { APP_LOCK_FREQUENCIES, getFrequencyLabel } from "../utils/appLock";
+import {
+  isNotificationSupported,
+  getNotificationPermission,
+  getDesktopNotifEnabled,
+  setDesktopNotifEnabled,
+  requestDesktopNotificationPermission,
+  showDesktopNotification,
+  TALKLY_LOCKED_ICON,
+} from "../utils/notifications";
 
 function formatLastSeen(ts) {
   if (!ts || typeof ts !== "number") return "Offline";
@@ -57,6 +71,146 @@ function formatLastSeen(ts) {
   if (isToday) return `Last seen today at ${timeStr}`;
   if (isYesterday) return `Last seen yesterday at ${timeStr}`;
   return `Last seen ${date.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
+
+function ShareProfileModal({
+  isOpen,
+  onClose,
+  profile,
+  currentUser,
+  onCopySuccess,
+}) {
+  if (!isOpen) return null;
+
+  const cleanId = (profile?.talklyId || "").replace(/^@+/, "");
+  const talklyIdDisplay = cleanId ? `@${cleanId}` : "";
+  const origin = typeof window !== "undefined" ? window.location.origin : "";
+  const shareSearchUrl = `${origin}/?search=${encodeURIComponent(talklyIdDisplay)}`;
+
+  const copyText = async (value, successMsg) => {
+    try {
+      await navigator.clipboard?.writeText(value);
+      onCopySuccess(successMsg);
+    } catch {
+      onCopySuccess("Could not copy automatically.");
+    }
+  };
+
+  const handleNativeShare = () => {
+    if (navigator.share) {
+      navigator
+        .share({
+          title: "My Talkly Profile",
+          text: `Find me on Talkly! My ID is ${talklyIdDisplay}`,
+          url: shareSearchUrl,
+        })
+        .catch((err) => {
+          if (err?.name !== "AbortError") {
+            copyText(shareSearchUrl, "Profile link copied to clipboard!");
+          }
+        });
+    } else {
+      copyText(shareSearchUrl, "Profile link copied to clipboard!");
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/45 backdrop-blur-[2px] z-[60] flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl shadow-2xl w-full max-w-sm p-6 relative text-center"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute top-4 right-4 p-1.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"
+          aria-label="Close share profile"
+        >
+          <X className="w-5 h-5" />
+        </button>
+
+        <div className="flex flex-col items-center mt-1 mb-4">
+          <img
+            src={
+              currentUser?.photoURL ||
+              "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
+            }
+            alt={profile?.displayName || currentUser?.displayName || ""}
+            className="w-16 h-16 rounded-full object-cover border-2 border-blue-500/30 shadow-sm mb-2"
+          />
+          <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
+            Share Talkly Profile
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            Scan the QR code, share your link, or copy your Talkly ID
+          </p>
+        </div>
+
+        {/* Scannable QR Code */}
+        <div className="inline-flex flex-col items-center p-4 rounded-2xl bg-white border border-gray-200 shadow-xs mb-4">
+          <QRCodeSVG value={shareSearchUrl} size={152} includeMargin={false} />
+          <span className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600">
+            <QrCode className="w-3.5 h-3.5" />
+            {talklyIdDisplay || "Talkly"}
+          </span>
+        </div>
+
+        {/* Talkly ID quick copy */}
+        {talklyIdDisplay && (
+          <div className="flex items-center justify-between gap-2 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 mb-2.5">
+            <div className="text-left min-w-0">
+              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
+                Talkly ID
+              </p>
+              <p className="text-sm font-semibold text-blue-600 dark:text-blue-400 truncate">
+                {talklyIdDisplay}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => copyText(talklyIdDisplay, "Talkly ID copied!")}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors shrink-0"
+            >
+              <Copy className="w-3.5 h-3.5" />
+              Copy ID
+            </button>
+          </div>
+        )}
+
+        {/* Query-based Share URL (works directly on Firebase Hosting without 404) */}
+        <div className="flex items-center justify-between gap-2 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 mb-4">
+          <div className="text-left min-w-0">
+            <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
+              Direct Link
+            </p>
+            <p className="text-xs text-gray-700 dark:text-gray-300 truncate">
+              {shareSearchUrl}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => copyText(shareSearchUrl, "Profile link copied!")}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200/80 dark:bg-gray-800 text-gray-800 dark:text-gray-200 text-xs font-medium hover:bg-gray-300/80 dark:hover:bg-gray-700 transition-colors shrink-0"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            Copy Link
+          </button>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleNativeShare}
+          className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2 shadow-sm"
+        >
+          <Share2 className="w-4 h-4" />
+          Share Profile Link
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
@@ -245,12 +399,22 @@ export default function Sidebar() {
   const [showLockPasswords, setShowLockPasswords] = useState(false);
   const [lockError, setLockError] = useState("");
   const [savingLock, setSavingLock] = useState(false);
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [desktopNotifEnabled, setDesktopNotifEnabledState] = useState(() =>
+    getDesktopNotifEnabled(currentUser?.uid)
+  );
+  const [notifPermission, setNotifPermission] = useState(() => getNotificationPermission());
 
   const userCacheRef = useRef(new Map());
   const deliveringChatsRef = useRef(new Set());
   const mainMenuRef = useRef(null);
   const immediateSearchRef = useRef(false);
   const searchInputRef = useRef(null);
+
+  useEffect(() => {
+    setNotifPermission(getNotificationPermission());
+    setDesktopNotifEnabledState(getDesktopNotifEnabled(currentUser?.uid));
+  }, [currentUser?.uid]);
 
   useEffect(() => {
     if (!toastMsg) return;
@@ -359,26 +523,38 @@ export default function Sidebar() {
   };
 
   const handleShareProfile = () => {
-    const cleanId = (myProfile?.talklyId || "").replace(/^@+/, "");
-    const profileUrl = `${window.location.origin}/search=@${cleanId}`;
-    if (navigator.share) {
-      navigator
-        .share({
-          title: "My Talkly Profile",
-          text: `Find me on Talkly! My ID is @${cleanId}`,
-          url: profileUrl,
-        })
-        .catch((err) => {
-          if (err?.name !== "AbortError") {
-            navigator.clipboard?.writeText(profileUrl);
-            setToastMsg("Profile link copied to clipboard!");
-          }
-        });
-    } else {
-      navigator.clipboard?.writeText(profileUrl);
-      setToastMsg("Profile link copied to clipboard!");
-    }
     setShowMainMenu(false);
+    setShowShareModal(true);
+  };
+
+  const handleToggleDesktopNotifications = async () => {
+    if (!isNotificationSupported()) {
+      setToastMsg("Desktop notifications are not supported in this browser.");
+      return;
+    }
+    if (desktopNotifEnabled) {
+      setDesktopNotifEnabled(currentUser?.uid, false);
+      setDesktopNotifEnabledState(false);
+      setToastMsg("Desktop notifications turned off.");
+      return;
+    }
+
+    const { granted, permission } = await requestDesktopNotificationPermission(currentUser?.uid);
+    setNotifPermission(permission);
+    if (granted) {
+      setDesktopNotifEnabled(currentUser?.uid, true);
+      setDesktopNotifEnabledState(true);
+      setToastMsg("Desktop notifications enabled!");
+      showDesktopNotification({
+        title: "Talkly Notifications Active",
+        body: "You will be notified here when new messages arrive.",
+        icon: TALKLY_LOCKED_ICON,
+        tag: "talkly-test-notification",
+      });
+    } else if (permission === "denied") {
+      setDesktopNotifEnabledState(false);
+      setToastMsg("Notifications blocked in browser settings. Enable them for this site.");
+    }
   };
 
   // Trigger automatic search from shared /search=@... link (both when already logged in and right after login)
@@ -903,6 +1079,13 @@ export default function Sidebar() {
             )}
           </div>
         </div>
+        <ShareProfileModal
+          isOpen={showShareModal}
+          onClose={() => setShowShareModal(false)}
+          profile={myProfile}
+          currentUser={currentUser}
+          onCopySuccess={(msg) => setToastMsg(msg)}
+        />
       </div>
     );
   }
@@ -939,6 +1122,22 @@ export default function Sidebar() {
         </div>
 
         <div className="flex gap-4 text-gray-500 dark:text-gray-400 relative items-center" ref={mainMenuRef}>
+          <button
+            type="button"
+            onClick={handleToggleDesktopNotifications}
+            className={`hover:text-blue-600 dark:hover:text-blue-400 transition relative ${
+              desktopNotifEnabled ? "text-blue-600 dark:text-blue-400" : ""
+            }`}
+            title={
+              desktopNotifEnabled
+                ? "Desktop Notifications On (click to mute)"
+                : notifPermission === "denied"
+                ? "Notifications blocked in browser settings"
+                : "Enable Desktop Notifications"
+            }
+          >
+            {desktopNotifEnabled ? <Bell className="w-5 h-5" /> : <BellOff className="w-5 h-5" />}
+          </button>
           <button
             onClick={toggleTheme}
             className="hover:text-blue-600 dark:hover:text-blue-400 transition"
@@ -1332,6 +1531,58 @@ export default function Sidebar() {
                 )}
               </div>
 
+              {/* Web-to-Desktop Notifications */}
+              <div className="flex items-center justify-between gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
+                <div>
+                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100 flex items-center gap-1.5">
+                    {desktopNotifEnabled ? (
+                      <Bell className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                    ) : (
+                      <BellOff className="w-4 h-4 text-gray-400" />
+                    )}
+                    Desktop Notifications
+                  </p>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                    {!isNotificationSupported()
+                      ? "Not supported in this browser"
+                      : notifPermission === "denied"
+                      ? "Blocked in browser settings"
+                      : desktopNotifEnabled
+                      ? "Active • Private alert when locked; muted on open chat"
+                      : "Off • Click Enable for desktop alerts"}
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {desktopNotifEnabled && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        showDesktopNotification({
+                          title: "Talkly Test Notification",
+                          body: "Desktop alerts are working cleanly.",
+                          icon: TALKLY_LOCKED_ICON,
+                          tag: "talkly-test-notification",
+                        })
+                      }
+                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                    >
+                      Test
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleToggleDesktopNotifications}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                      desktopNotifEnabled
+                        ? "bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400"
+                        : "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
+                    }`}
+                  >
+                    {desktopNotifEnabled ? "Disable" : "Enable"}
+                  </button>
+                </div>
+              </div>
+
               <div className="flex items-center justify-between py-2">
                 <div>
                   <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Connection Status</p>
@@ -1349,6 +1600,14 @@ export default function Sidebar() {
           </div>
         </div>
       )}
+
+      <ShareProfileModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+        profile={myProfile}
+        currentUser={currentUser}
+        onCopySuccess={(msg) => setToastMsg(msg)}
+      />
 
       {/* User Profile Details Modal (Two-Step Before Sending Request) */}
       {selectedProfileUser && (

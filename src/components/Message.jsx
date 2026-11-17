@@ -10,6 +10,9 @@ export default function Message({
   disappearingMode = "off",
   nowMs,
   fallbackReadAtMs,
+  disappearDeadlineMs,
+  disappearDurationMs,
+  isTimerPaused = false,
   onEditMessage,
   onDeleteMessage,
 }) {
@@ -99,13 +102,22 @@ export default function Message({
   let progressPct = 100;
   if (isAfterSeen && isSeen) {
     const currentMs = nowMs || Date.now();
-    const readAtMs = message.readAt?.toMillis
-      ? message.readAt.toMillis()
-      : fallbackReadAtMs || currentMs;
-    const elapsed = Math.max(0, currentMs - readAtMs);
-    const remainingMs = Math.max(0, AFTER_SEEN_MS - elapsed);
+    const totalDuration = disappearDurationMs || AFTER_SEEN_MS;
+    let remainingMs = totalDuration;
+    if (typeof disappearDeadlineMs === "number") {
+      remainingMs = Math.max(0, disappearDeadlineMs - currentMs);
+    } else {
+      const readAtMs = message.readAt?.toMillis
+        ? message.readAt.toMillis()
+        : fallbackReadAtMs || currentMs;
+      const elapsed = Math.max(0, currentMs - readAtMs);
+      remainingMs = Math.max(0, totalDuration - elapsed);
+    }
     remainingSec = Math.ceil(remainingMs / 1000);
-    progressPct = Math.max(0, Math.min(100, (remainingMs / AFTER_SEEN_MS) * 100));
+    progressPct =
+      remainingMs >= totalDuration
+        ? 100
+        : Math.max(0, Math.min(100, (remainingMs / totalDuration) * 100));
   }
 
   const effectiveTimerMode = message.disappearMode || disappearingMode;
@@ -159,7 +171,11 @@ export default function Message({
                 }`}
               >
                 <Flame className="w-3 h-3 shrink-0" />
-                {isSeen ? `Vanishes in ${remainingSec}s` : "Seen & Disappear"}
+                {isSeen
+                  ? isTimerPaused
+                    ? `Paused • ${remainingSec}s`
+                    : `Vanishes in ${remainingSec}s`
+                  : "Seen & Disappear"}
               </span>
             </div>
           )}
