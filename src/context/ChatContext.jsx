@@ -9,6 +9,7 @@ export const ChatProvider = ({ children }) => {
     chatId: "null",
     user: {},
     isMobileView: false,
+    pendingSearch: "",
   };
 
   const chatReducer = (state, action) => {
@@ -32,6 +33,17 @@ export const ChatProvider = ({ children }) => {
         return {
           ...state,
           isMobileView: false,
+        };
+      case "SET_PENDING_SEARCH":
+        return {
+          ...state,
+          pendingSearch: action.payload || "",
+          isMobileView: false,
+        };
+      case "CLEAR_PENDING_SEARCH":
+        return {
+          ...state,
+          pendingSearch: "",
         };
       default:
         return state;

@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
-import { MessageSquare, Mail, Lock, User, ArrowLeft } from "lucide-react";
+import { useChat } from "../context/ChatContext";
+import { MessageSquare, Mail, Lock, User, ArrowLeft, Search } from "lucide-react";
 
 export default function Login() {
   const { loginWithGoogle, signupWithEmail, loginWithEmail, resetPassword, sendMagicLink } = useAuth();
+  const { data } = useChat();
   const [view, setView] = useState("login"); // login, signup, forgot, magic
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -12,6 +14,15 @@ export default function Login() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+
+  let pendingSearch = data?.pendingSearch || "";
+  if (!pendingSearch) {
+    try {
+      pendingSearch = localStorage.getItem("talkly_pending_search") || "";
+    } catch {
+      pendingSearch = "";
+    }
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -55,6 +66,13 @@ export default function Login() {
         </div>
         <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-1">Talkly</h1>
         <p className="text-gray-500 dark:text-gray-400 mb-6 text-sm">Connect and chat with anyone, anywhere.</p>
+
+        {pendingSearch && (
+          <div className="w-full bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 p-3 rounded-xl text-sm mb-4 border border-blue-100 dark:border-blue-800/40 flex items-center justify-center gap-2">
+            <Search className="w-4 h-4 shrink-0" />
+            <span>Sign in to find <strong className="font-semibold">{pendingSearch}</strong></span>
+          </div>
+        )}
         
         {error && <div className="w-full bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 p-3 rounded-lg text-sm mb-4 border border-red-100 dark:border-red-800/30">{error}</div>}
         {message && <div className="w-full bg-green-50 dark:bg-green-900/20 text-green-600 dark:text-green-400 p-3 rounded-lg text-sm mb-4 border border-green-100 dark:border-green-800/30">{message}</div>}
