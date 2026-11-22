@@ -39,6 +39,9 @@ export function setDesktopNotifEnabled(uid, enabled) {
   } catch {
     // ignore storage errors
   }
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("talkly-notif-pref-changed"));
+  }
 }
 
 export async function requestDesktopNotificationPermission(uid) {

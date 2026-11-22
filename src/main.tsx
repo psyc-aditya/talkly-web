@@ -6,6 +6,7 @@ import './index.css';
 import { AuthProvider } from './context/AuthContext';
 import { ChatProvider } from './context/ChatContext';
 import { ThemeProvider } from './context/ThemeContext';
+import { ContextMenuProvider } from './context/ContextMenuContext';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
@@ -13,7 +14,9 @@ createRoot(document.getElementById('root')!).render(
       <ThemeProvider>
         <AuthProvider>
           <ChatProvider>
-            <App />
+            <ContextMenuProvider>
+              <App />
+            </ContextMenuProvider>
           </ChatProvider>
         </AuthProvider>
       </ThemeProvider>

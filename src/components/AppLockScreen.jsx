@@ -122,8 +122,8 @@ export default function AppLockScreen() {
               </button>
             </div>
           ) : (
-            <div className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 rounded-2xl p-4 text-left space-y-3">
-              <p className="text-xs text-amber-900 dark:text-amber-200 leading-relaxed">
+            <div className="bg-blue-50/80 dark:bg-slate-800/70 border border-blue-200/80 dark:border-slate-700 rounded-2xl p-4 text-left space-y-3">
+              <p className="text-xs text-slate-700 dark:text-slate-200 leading-relaxed">
                 To reset your opening password, sign out and log back in with your Talkly account. Your chats will remain safe.
               </p>
               <div className="flex gap-2 justify-end">
@@ -137,7 +137,7 @@ export default function AppLockScreen() {
                 <button
                   type="button"
                   onClick={requestResetAppLock}
-                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-700 text-white"
+                  className="px-3 py-1.5 text-xs font-semibold rounded-lg bg-blue-600 hover:bg-blue-700 text-white"
                 >
                   Sign Out &amp; Reset
                 </button>

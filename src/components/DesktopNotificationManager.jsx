@@ -8,6 +8,7 @@ import {
   showDesktopNotification,
   TALKLY_LOCKED_ICON,
 } from "../utils/notifications";
+import { isChatMuted } from "../utils/chatPrefs";
 
 export default function DesktopNotificationManager() {
   const { currentUser, isAppLocked } = useAuth();
@@ -15,6 +16,7 @@ export default function DesktopNotificationManager() {
 
   const isLockedRef = useRef(isAppLocked);
   const activeChatIdRef = useRef(data.chatId);
+  const isSettingsOpenRef = useRef(Boolean(data.showSettings));
   const initializedRef = useRef(false);
   const prevChatStatesRef = useRef(new Map());
   const userCacheRef = useRef(new Map());
@@ -27,6 +29,10 @@ export default function DesktopNotificationManager() {
   useEffect(() => {
     activeChatIdRef.current = data.chatId;
   }, [data.chatId]);
+
+  useEffect(() => {
+    isSettingsOpenRef.current = Boolean(data.showSettings);
+  }, [data.showSettings]);
 
   // Keep current user's blockedUsers list synced so blocked accounts never notify
   useEffect(() => {
@@ -145,6 +151,7 @@ export default function DesktopNotificationManager() {
 
           const isActivelyReadingThisChat =
             !isLockedRef.current &&
+            !isSettingsOpenRef.current &&
             activeChatIdRef.current === chatId &&
             typeof document !== "undefined" &&
             document.visibilityState === "visible" &&
@@ -155,7 +162,7 @@ export default function DesktopNotificationManager() {
             continue;
           }
 
-          if (!getDesktopNotifEnabled(currentUser.uid)) {
+          if (!getDesktopNotifEnabled(currentUser.uid) || isChatMuted(currentUser.uid, chatId)) {
             continue;
           }
 

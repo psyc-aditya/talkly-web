@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useChat } from "../context/ChatContext";
 import { useTheme } from "../context/ThemeContext";
-import { db, auth, rtdb } from "../firebase";
+import { useContextMenu } from "../context/ContextMenuContext";
+import { db, rtdb } from "../firebase";
 import {
   collection,
   query,
@@ -19,35 +20,34 @@ import {
   deleteDoc,
 } from "firebase/firestore";
 import { ref as rtdbRef, onValue } from "firebase/database";
-import { updateProfile } from "firebase/auth";
 import {
-  Share2,
-  ArrowLeft,
-  Sun,
-  Moon,
   X,
   MessageSquarePlus,
-  MoreVertical,
-  LogOut,
+  Settings,
   Search,
   Check,
   CheckCheck,
-  Flame,
   WifiOff,
   UserPlus,
   MessageSquare,
   Clock,
-  Lock,
-  Eye,
-  EyeOff,
   Bell,
   BellOff,
+  Pin,
+  PinOff,
+  User,
+  Eraser,
+  Trash2,
+  UserMinus,
+  Ban,
+  ChevronDown,
+  CircleDot,
   Copy,
-  QrCode,
+  Sun,
+  Moon,
+  Lock,
 } from "lucide-react";
-import { QRCodeSVG } from "qrcode.react";
 import { handleFirestoreError, OperationType } from "../utils/errorHandler";
-import { APP_LOCK_FREQUENCIES, getFrequencyLabel } from "../utils/appLock";
 import {
   isNotificationSupported,
   getNotificationPermission,
@@ -57,6 +57,15 @@ import {
   showDesktopNotification,
   TALKLY_LOCKED_ICON,
 } from "../utils/notifications";
+import {
+  getPinnedChatIds,
+  togglePinnedChat,
+  getMutedChatIds,
+  toggleMutedChat,
+  getHiddenChatsMap,
+  markChatHidden,
+  unhideChat,
+} from "../utils/chatPrefs";
 
 function formatLastSeen(ts) {
   if (!ts || typeof ts !== "number") return "Offline";
@@ -73,147 +82,16 @@ function formatLastSeen(ts) {
   return `Last seen ${date.toLocaleDateString([], { month: "short", day: "numeric" })}`;
 }
 
-function ShareProfileModal({
-  isOpen,
-  onClose,
-  profile,
-  currentUser,
-  onCopySuccess,
+function ChatRow({
+  chat,
+  currentUserId,
+  isSelected,
+  isPinned,
+  isMuted,
+  onSelect,
+  onContextMenu,
+  onOpenMenuButton,
 }) {
-  if (!isOpen) return null;
-
-  const cleanId = (profile?.talklyId || "").replace(/^@+/, "");
-  const talklyIdDisplay = cleanId ? `@${cleanId}` : "";
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const shareSearchUrl = `${origin}/?search=${encodeURIComponent(talklyIdDisplay)}`;
-
-  const copyText = async (value, successMsg) => {
-    try {
-      await navigator.clipboard?.writeText(value);
-      onCopySuccess(successMsg);
-    } catch {
-      onCopySuccess("Could not copy automatically.");
-    }
-  };
-
-  const handleNativeShare = () => {
-    if (navigator.share) {
-      navigator
-        .share({
-          title: "My Talkly Profile",
-          text: `Find me on Talkly! My ID is ${talklyIdDisplay}`,
-          url: shareSearchUrl,
-        })
-        .catch((err) => {
-          if (err?.name !== "AbortError") {
-            copyText(shareSearchUrl, "Profile link copied to clipboard!");
-          }
-        });
-    } else {
-      copyText(shareSearchUrl, "Profile link copied to clipboard!");
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 bg-black/45 backdrop-blur-[2px] z-[60] flex items-center justify-center p-4"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-3xl shadow-2xl w-full max-w-sm p-6 relative text-center"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          type="button"
-          onClick={onClose}
-          className="absolute top-4 right-4 p-1.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"
-          aria-label="Close share profile"
-        >
-          <X className="w-5 h-5" />
-        </button>
-
-        <div className="flex flex-col items-center mt-1 mb-4">
-          <img
-            src={
-              currentUser?.photoURL ||
-              "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
-            }
-            alt={profile?.displayName || currentUser?.displayName || ""}
-            className="w-16 h-16 rounded-full object-cover border-2 border-blue-500/30 shadow-sm mb-2"
-          />
-          <h3 className="text-lg font-bold text-gray-900 dark:text-gray-100">
-            Share Talkly Profile
-          </h3>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            Scan the QR code, share your link, or copy your Talkly ID
-          </p>
-        </div>
-
-        {/* Scannable QR Code */}
-        <div className="inline-flex flex-col items-center p-4 rounded-2xl bg-white border border-gray-200 shadow-xs mb-4">
-          <QRCodeSVG value={shareSearchUrl} size={152} includeMargin={false} />
-          <span className="mt-2 inline-flex items-center gap-1 text-[11px] font-semibold text-blue-600">
-            <QrCode className="w-3.5 h-3.5" />
-            {talklyIdDisplay || "Talkly"}
-          </span>
-        </div>
-
-        {/* Talkly ID quick copy */}
-        {talklyIdDisplay && (
-          <div className="flex items-center justify-between gap-2 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 mb-2.5">
-            <div className="text-left min-w-0">
-              <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
-                Talkly ID
-              </p>
-              <p className="text-sm font-semibold text-blue-600 dark:text-blue-400 truncate">
-                {talklyIdDisplay}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => copyText(talklyIdDisplay, "Talkly ID copied!")}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 text-xs font-medium hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors shrink-0"
-            >
-              <Copy className="w-3.5 h-3.5" />
-              Copy ID
-            </button>
-          </div>
-        )}
-
-        {/* Query-based Share URL (works directly on Firebase Hosting without 404) */}
-        <div className="flex items-center justify-between gap-2 bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 rounded-xl px-3 py-2 mb-4">
-          <div className="text-left min-w-0">
-            <p className="text-[10px] uppercase tracking-wider text-gray-400 font-semibold">
-              Direct Link
-            </p>
-            <p className="text-xs text-gray-700 dark:text-gray-300 truncate">
-              {shareSearchUrl}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => copyText(shareSearchUrl, "Profile link copied!")}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200/80 dark:bg-gray-800 text-gray-800 dark:text-gray-200 text-xs font-medium hover:bg-gray-300/80 dark:hover:bg-gray-700 transition-colors shrink-0"
-          >
-            <Copy className="w-3.5 h-3.5" />
-            Copy Link
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={handleNativeShare}
-          className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition-colors flex items-center justify-center gap-2 shadow-sm"
-        >
-          <Share2 className="w-4 h-4" />
-          Share Profile Link
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
   const [userPresence, setUserPresence] = useState("offline");
   const [isTyping, setIsTyping] = useState(false);
 
@@ -245,12 +123,13 @@ function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
 
   return (
     <div
-      className={`flex items-center p-3 cursor-pointer transition-colors ${
+      className={`group flex items-center p-3 cursor-pointer transition-colors relative ${
         isSelected
           ? "bg-blue-50/70 dark:bg-blue-900/20"
           : "hover:bg-gray-50 dark:hover:bg-gray-800"
       }`}
       onClick={onSelect}
+      onContextMenu={(e) => onContextMenu?.(e, chat)}
     >
       <div className="relative mr-4 shrink-0">
         <img
@@ -266,7 +145,7 @@ function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
             userPresence === "online"
               ? "bg-emerald-500"
               : userPresence === "away"
-              ? "bg-amber-400"
+              ? "bg-sky-400"
               : "bg-gray-400 dark:bg-gray-600"
           }`}
           title={
@@ -281,19 +160,33 @@ function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
 
       <div className="flex-1 min-w-0 border-b border-gray-100 dark:border-gray-800 pb-3 pt-1 flex flex-col justify-center">
         <div className="flex justify-between items-center gap-2">
-          <span
-            className={`text-[17px] truncate ${
-              unreadCount > 0
-                ? "font-semibold text-gray-900 dark:text-white"
-                : "text-gray-900 dark:text-gray-100"
-            }`}
-          >
-            {chat.userInfo?.displayName}
-          </span>
-          <div className="flex flex-col items-end gap-1 shrink-0">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span
+              className={`text-[17px] truncate ${
+                unreadCount > 0
+                  ? "font-semibold text-gray-900 dark:text-white"
+                  : "text-gray-900 dark:text-gray-100"
+              }`}
+            >
+              {chat.userInfo?.displayName}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {isMuted && (
+              <BellOff
+                className="w-3.5 h-3.5 text-gray-400 dark:text-gray-500 shrink-0"
+                title="Muted"
+              />
+            )}
+            {isPinned && (
+              <Pin
+                className="w-3.5 h-3.5 text-blue-500 dark:text-sky-400 shrink-0 rotate-45"
+                title="Pinned"
+              />
+            )}
             {chat.updatedAt && (
               <span
-                className={`text-xs ${
+                className={`text-xs tabular-nums ${
                   unreadCount > 0
                     ? "text-blue-600 dark:text-blue-400 font-medium"
                     : "text-gray-500 dark:text-gray-400"
@@ -305,52 +198,69 @@ function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
                 })}
               </span>
             )}
-            {unreadCount > 0 && (
-              <span className="bg-blue-600 dark:bg-blue-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center">
-                {unreadCount}
-              </span>
-            )}
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 mt-0.5 pr-4 min-w-0">
-          {isTyping ? (
-            <span className="text-sm text-blue-600 dark:text-blue-400 font-medium truncate">
-              typing...
-            </span>
-          ) : chat.status === "pending" ? (
-            <p className="text-sm text-gray-500 dark:text-gray-400 truncate">
-              Waiting for response...
-            </p>
-          ) : chat.lastMessage?.disappeared ? (
-            <p className="text-sm text-amber-600 dark:text-amber-400 italic truncate flex items-center gap-1">
-              <Flame className="w-3.5 h-3.5 shrink-0" />
-              <span>Message disappeared</span>
-            </p>
-          ) : (
-            <>
-              {isLastOutgoing && chat.lastMessage?.text && (
-                <span className="shrink-0 inline-flex items-center">
-                  {lastStatus === "read" ? (
-                    <CheckCheck className="w-4 h-4 text-blue-500 dark:text-blue-400" />
-                  ) : lastStatus === "delivered" ? (
-                    <CheckCheck className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-                  ) : (
-                    <Check className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-                  )}
-                </span>
-              )}
-              <p
-                className={`text-sm truncate ${
-                  unreadCount > 0
-                    ? "text-gray-900 dark:text-gray-100 font-medium"
-                    : "text-gray-500 dark:text-gray-400"
-                }`}
-              >
-                {chat.lastMessage?.text || (chat.clearedAt ? "No messages yet" : "Started a chat")}
+        <div className="flex items-center justify-between gap-2 mt-0.5 min-w-0">
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
+            {isTyping ? (
+              <span className="text-sm text-blue-600 dark:text-blue-400 font-medium truncate">
+                typing...
+              </span>
+            ) : chat.status === "pending" ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400 truncate">
+                Waiting for response...
               </p>
-            </>
-          )}
+            ) : chat.lastMessage?.disappeared ? (
+              <p className="text-sm text-slate-500 dark:text-slate-400 italic truncate flex items-center gap-1">
+                <Clock className="w-3.5 h-3.5 shrink-0" />
+                <span>Message disappeared</span>
+              </p>
+            ) : (
+              <>
+                {isLastOutgoing && chat.lastMessage?.text && (
+                  <span className="shrink-0 inline-flex items-center">
+                    {lastStatus === "read" ? (
+                      <CheckCheck className="w-4 h-4 text-blue-500 dark:text-blue-400" />
+                    ) : lastStatus === "delivered" ? (
+                      <CheckCheck className="w-4 h-4 text-gray-400 dark:text-gray-500" />
+                    ) : (
+                      <Check className="w-4 h-4 text-gray-400 dark:text-gray-500" />
+                    )}
+                  </span>
+                )}
+                <p
+                  className={`text-sm truncate ${
+                    unreadCount > 0
+                      ? "text-gray-900 dark:text-gray-100 font-medium"
+                      : "text-gray-500 dark:text-gray-400"
+                  }`}
+                >
+                  {chat.lastMessage?.text || (chat.clearedAt ? "No messages yet" : "Started a chat")}
+                </p>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 shrink-0">
+            {unreadCount > 0 && (
+              <span className="bg-blue-600 dark:bg-blue-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[20px] text-center tabular-nums">
+                {unreadCount}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenMenuButton?.(e, chat);
+              }}
+              title="Chat options"
+              aria-label={`Options for ${chat.userInfo?.displayName || "chat"}`}
+              className="p-1 rounded-full text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/80 dark:hover:bg-gray-700/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+            >
+              <ChevronDown className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -358,48 +268,29 @@ function ChatRow({ chat, currentUserId, isSelected, onSelect }) {
 }
 
 export default function Sidebar() {
-  const {
-    currentUser,
-    isOnline,
-    logout,
-    appLockConfig,
-    lockAppNow,
-    saveAppLock,
-    disableAppLock,
-    verifyCurrentAppLockPassword,
-  } = useAuth();
+  const { currentUser, isOnline, appLockConfig, lockAppNow } = useAuth();
   const { data, dispatch } = useChat();
   const { darkMode, toggleTheme } = useTheme();
+  const { openContextMenu } = useContextMenu();
   const [chats, setChats] = useState([]);
   const [searchUsername, setSearchUsername] = useState("");
   const [allUsers, setAllUsers] = useState([]);
   const [showContacts, setShowContacts] = useState(false);
-  const [showProfile, setShowProfile] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [newName, setNewName] = useState(currentUser.displayName || "");
-  const [newAbout, setNewAbout] = useState("");
   const [myProfile, setMyProfile] = useState(null);
-  const [blockedUsersList, setBlockedUsersList] = useState([]);
 
-  const [newTalklyId, setNewTalklyId] = useState("");
-  const [showMainMenu, setShowMainMenu] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
-  const [profileError, setProfileError] = useState("");
   const [selectedProfileUser, setSelectedProfileUser] = useState(null);
   const [selectedProfileOnline, setSelectedProfileOnline] = useState("offline");
   const [selectedProfileLastSeen, setSelectedProfileLastSeen] = useState(null);
   const [isSubmittingRequest, setIsSubmittingRequest] = useState(false);
+  const [confirmModal, setConfirmModal] = useState(null);
+  const [isRunningAction, setIsRunningAction] = useState(false);
 
-  const [showLockEditor, setShowLockEditor] = useState(false);
-  const [currentLockPwd, setCurrentLockPwd] = useState("");
-  const [newLockPwd, setNewLockPwd] = useState("");
-  const [confirmLockPwd, setConfirmLockPwd] = useState("");
-  const [lockFrequency, setLockFrequency] = useState("every_visit");
-  const [showLockPasswords, setShowLockPasswords] = useState(false);
-  const [lockError, setLockError] = useState("");
-  const [savingLock, setSavingLock] = useState(false);
-  const [showShareModal, setShowShareModal] = useState(false);
+  const [pinnedChatIds, setPinnedChatIds] = useState(() => getPinnedChatIds(currentUser?.uid));
+  const [mutedChatIds, setMutedChatIds] = useState(() => getMutedChatIds(currentUser?.uid));
+  const [hiddenChatsMap, setHiddenChatsMap] = useState(() => getHiddenChatsMap(currentUser?.uid));
+
   const [desktopNotifEnabled, setDesktopNotifEnabledState] = useState(() =>
     getDesktopNotifEnabled(currentUser?.uid)
   );
@@ -407,13 +298,28 @@ export default function Sidebar() {
 
   const userCacheRef = useRef(new Map());
   const deliveringChatsRef = useRef(new Set());
-  const mainMenuRef = useRef(null);
   const immediateSearchRef = useRef(false);
   const searchInputRef = useRef(null);
 
   useEffect(() => {
-    setNotifPermission(getNotificationPermission());
-    setDesktopNotifEnabledState(getDesktopNotifEnabled(currentUser?.uid));
+    const syncPrefs = () => {
+      setPinnedChatIds(getPinnedChatIds(currentUser?.uid));
+      setMutedChatIds(getMutedChatIds(currentUser?.uid));
+      setHiddenChatsMap(getHiddenChatsMap(currentUser?.uid));
+    };
+    syncPrefs();
+    window.addEventListener("talkly-chat-prefs-changed", syncPrefs);
+    return () => window.removeEventListener("talkly-chat-prefs-changed", syncPrefs);
+  }, [currentUser?.uid]);
+
+  useEffect(() => {
+    const syncNotif = () => {
+      setNotifPermission(getNotificationPermission());
+      setDesktopNotifEnabledState(getDesktopNotifEnabled(currentUser?.uid));
+    };
+    syncNotif();
+    window.addEventListener("talkly-notif-pref-changed", syncNotif);
+    return () => window.removeEventListener("talkly-notif-pref-changed", syncNotif);
   }, [currentUser?.uid]);
 
   useEffect(() => {
@@ -423,109 +329,20 @@ export default function Sidebar() {
   }, [toastMsg]);
 
   useEffect(() => {
-    if (!showMainMenu) return;
-    const handleOutside = (e) => {
-      if (mainMenuRef.current && !mainMenuRef.current.contains(e.target)) {
-        setShowMainMenu(false);
-      }
-    };
-    document.addEventListener("mousedown", handleOutside);
-    return () => document.removeEventListener("mousedown", handleOutside);
-  }, [showMainMenu]);
-
-  useEffect(() => {
-    const fetchMe = async () => {
-      try {
-        const d = await getDoc(doc(db, "users", currentUser.uid));
-        if (d.exists()) {
-          const userData = d.data();
-          setMyProfile(userData);
-          setNewAbout(userData.about || "Hey there! I am using Talkly.");
-          setNewName(userData.displayName || currentUser.displayName);
-          setNewTalklyId(userData.talklyId?.replace("@", "") || "");
+    if (!currentUser?.uid) return;
+    const unsub = onSnapshot(
+      doc(db, "users", currentUser.uid),
+      (snap) => {
+        if (snap.exists()) {
+          setMyProfile(snap.data());
         }
-      } catch (e) {
+      },
+      (e) => {
         console.error(e);
       }
-    };
-    if (currentUser?.uid) fetchMe();
-  }, [currentUser]);
-
-  useEffect(() => {
-    const fetchBlockedUsers = async () => {
-      if (showProfile && myProfile?.blockedUsers?.length > 0) {
-        try {
-          const q = query(collection(db, "users"), where("uid", "in", myProfile.blockedUsers));
-          const querySnapshot = await getDocs(q);
-          const users = [];
-          querySnapshot.forEach((d) => {
-            users.push(d.data());
-          });
-          setBlockedUsersList(users);
-        } catch (err) {
-          console.error("Error fetching blocked users:", err);
-        }
-      } else {
-        setBlockedUsersList([]);
-      }
-    };
-    fetchBlockedUsers();
-  }, [showProfile, myProfile?.blockedUsers]);
-
-  const handleUnblock = async (userIdToUnblock) => {
-    try {
-      const updatedBlockedUsers = myProfile.blockedUsers.filter((id) => id !== userIdToUnblock);
-      await updateDoc(doc(db, "users", currentUser.uid), {
-        blockedUsers: updatedBlockedUsers,
-      });
-      setMyProfile((prev) => ({ ...prev, blockedUsers: updatedBlockedUsers }));
-      setToastMsg("User unblocked.");
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}`);
-    }
-  };
-
-  const handleSaveProfile = async () => {
-    setProfileError("");
-    try {
-      const formattedId = newTalklyId
-        ? newTalklyId.startsWith("@")
-          ? newTalklyId
-          : "@" + newTalklyId
-        : myProfile.talklyId;
-
-      if (formattedId !== myProfile.talklyId) {
-        const q = query(collection(db, "users"), where("talklyId", "==", formattedId));
-        const querySnapshot = await getDocs(q);
-        if (!querySnapshot.empty) {
-          setProfileError("Username is already taken.");
-          return;
-        }
-      }
-
-      await updateProfile(auth.currentUser, { displayName: newName });
-      await updateDoc(doc(db, "users", currentUser.uid), {
-        displayName: newName,
-        about: newAbout,
-        talklyId: formattedId,
-      });
-      setMyProfile((prev) => ({
-        ...prev,
-        displayName: newName,
-        about: newAbout,
-        talklyId: formattedId,
-      }));
-      setShowProfile(false);
-      setToastMsg("Profile updated.");
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}`);
-    }
-  };
-
-  const handleShareProfile = () => {
-    setShowMainMenu(false);
-    setShowShareModal(true);
-  };
+    );
+    return () => unsub();
+  }, [currentUser?.uid]);
 
   const handleToggleDesktopNotifications = async () => {
     if (!isNotificationSupported()) {
@@ -574,8 +391,6 @@ export default function Sidebar() {
     immediateSearchRef.current = true;
     setSearchUsername(cleanQuery);
     setShowContacts(false);
-    setShowProfile(false);
-    setShowSettings(false);
     setSelectedProfileUser(null);
 
     try {
@@ -936,10 +751,413 @@ export default function Sidebar() {
   };
 
   const handleOpenChatFromModal = (u) => {
+    const combinedId = [currentUser.uid, u.uid].sort().join("_");
+    unhideChat(currentUser.uid, combinedId);
     setSelectedProfileUser(null);
     setSearchUsername("");
     setShowContacts(false);
     dispatch({ type: "CHANGE_USER", payload: u });
+  };
+
+  // Wipe messages helper shared by Clear Chat, Delete Chat, and Un-connect
+  const wipeChatMessages = async (chatId) => {
+    const q = query(collection(db, "messages"), where("chatId", "==", chatId));
+    const snap = await getDocs(q);
+    const ids = snap.docs.map((d) => d.id);
+
+    if (ids.length > 0) {
+      try {
+        const existing = JSON.parse(localStorage.getItem(`talkly_expired_${chatId}`) || "[]");
+        const merged = Array.from(
+          new Set([...(Array.isArray(existing) ? existing : []), ...ids])
+        ).slice(-300);
+        localStorage.setItem(`talkly_expired_${chatId}`, JSON.stringify(merged));
+      } catch {
+        // ignore storage errors
+      }
+
+      try {
+        const deleteBatch = writeBatch(db);
+        snap.docs.forEach((d) => deleteBatch.delete(doc(db, "messages", d.id)));
+        await deleteBatch.commit();
+      } catch (err) {
+        if (err?.code === "permission-denied") {
+          try {
+            const wipeBatch = writeBatch(db);
+            snap.docs.forEach((d) =>
+              wipeBatch.update(doc(db, "messages", d.id), {
+                expired: true,
+                text: "",
+                disappearedAt: serverTimestamp(),
+              })
+            );
+            await wipeBatch.commit();
+          } catch {
+            // fallback already handled via clearedAt + localStorage
+          }
+        }
+      }
+    }
+  };
+
+  const handleClearChatAction = async (chat) => {
+    if (!chat?.id) return;
+    setIsRunningAction(true);
+    try {
+      await wipeChatMessages(chat.id);
+      await updateDoc(doc(db, "chats", chat.id), {
+        lastMessage: null,
+        [`unreadCounts.${currentUser.uid}`]: 0,
+        clearedAt: serverTimestamp(),
+      }).catch(() => {});
+      setToastMsg(`Cleared chat with ${chat.userInfo?.displayName || "user"}.`);
+    } catch (err) {
+      if (err?.code !== "permission-denied") {
+        handleFirestoreError(err, OperationType.UPDATE, `chats/${chat.id}`);
+      }
+    } finally {
+      setIsRunningAction(false);
+      setConfirmModal(null);
+    }
+  };
+
+  const handleDeleteChatAction = async (chat) => {
+    if (!chat?.id) return;
+    setIsRunningAction(true);
+    try {
+      await wipeChatMessages(chat.id);
+      await updateDoc(doc(db, "chats", chat.id), {
+        lastMessage: null,
+        [`unreadCounts.${currentUser.uid}`]: 0,
+        clearedAt: serverTimestamp(),
+      }).catch(() => {});
+      markChatHidden(currentUser.uid, chat.id, Date.now() + 2000);
+      if (data.chatId === chat.id) {
+        dispatch({ type: "CHANGE_USER", payload: null });
+      }
+      setToastMsg(`Deleted chat with ${chat.userInfo?.displayName || "user"}.`);
+    } catch (err) {
+      if (err?.code !== "permission-denied") {
+        handleFirestoreError(err, OperationType.UPDATE, `chats/${chat.id}`);
+      }
+    } finally {
+      setIsRunningAction(false);
+      setConfirmModal(null);
+    }
+  };
+
+  const handleUnconnectAction = async (chat) => {
+    if (!chat?.id) return;
+    setIsRunningAction(true);
+    try {
+      await wipeChatMessages(chat.id);
+      await deleteDoc(doc(db, "chats", chat.id));
+      unhideChat(currentUser.uid, chat.id);
+      if (data.chatId === chat.id) {
+        dispatch({ type: "CHANGE_USER", payload: null });
+      }
+      setToastMsg(`Disconnected from ${chat.userInfo?.displayName || "user"}.`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.DELETE, `chats/${chat.id}`);
+    } finally {
+      setIsRunningAction(false);
+      setConfirmModal(null);
+    }
+  };
+
+  const handleBlockUserAction = async (userObj, chatId = null) => {
+    if (!userObj?.uid) return;
+    setIsRunningAction(true);
+    try {
+      const userRef = doc(db, "users", currentUser.uid);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        const blockedUsers = userSnap.data().blockedUsers || [];
+        if (!blockedUsers.includes(userObj.uid)) {
+          await updateDoc(userRef, {
+            blockedUsers: [...blockedUsers, userObj.uid],
+          });
+        }
+      }
+      if ((chatId && data.chatId === chatId) || data.user?.uid === userObj.uid) {
+        dispatch({ type: "CHANGE_USER", payload: null });
+      }
+      setToastMsg(`Blocked ${userObj.displayName || "user"}.`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `users/${currentUser.uid}`);
+    } finally {
+      setIsRunningAction(false);
+      setConfirmModal(null);
+    }
+  };
+
+  const handleToggleReadStatus = async (chat) => {
+    if (!chat?.id) return;
+    const currentUnread = chat.unreadCounts?.[currentUser.uid] || 0;
+    const nextUnread = currentUnread > 0 ? 0 : 1;
+    try {
+      await updateDoc(doc(db, "chats", chat.id), {
+        [`unreadCounts.${currentUser.uid}`]: nextUnread,
+      });
+      setToastMsg(nextUnread > 0 ? "Marked as unread." : "Marked as read.");
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `chats/${chat.id}`);
+    }
+  };
+
+  const openChatRowMenu = (x, y, chat) => {
+    const isPinned = pinnedChatIds.includes(chat.id);
+    const isMuted = mutedChatIds.includes(chat.id);
+    const hasUnread = (chat.unreadCounts?.[currentUser.uid] || 0) > 0;
+    const isPendingSent = chat.status === "pending" && chat.senderId === currentUser.uid;
+
+    openContextMenu({
+      x,
+      y,
+      header: {
+        avatar:
+          chat.userInfo?.photoURL ||
+          "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png",
+        title: chat.userInfo?.displayName || "Chat",
+        subtitle: chat.userInfo?.talklyId || "",
+      },
+      items: [
+        {
+          id: "open",
+          label: "Open Chat",
+          icon: MessageSquare,
+          onClick: () => dispatch({ type: "CHANGE_USER", payload: chat.userInfo }),
+        },
+        {
+          id: "profile",
+          label: "View Profile",
+          icon: User,
+          onClick: () => setSelectedProfileUser(chat.userInfo),
+        },
+        {
+          id: "pin",
+          label: isPinned ? "Unpin Chat" : "Pin Chat",
+          icon: isPinned ? PinOff : Pin,
+          active: isPinned,
+          onClick: () => {
+            const pinned = togglePinnedChat(currentUser.uid, chat.id);
+            setToastMsg(pinned ? "Chat pinned to top." : "Chat unpinned.");
+          },
+        },
+        {
+          id: "mute",
+          label: isMuted ? "Unmute Notifications" : "Mute Notifications",
+          icon: isMuted ? Bell : BellOff,
+          active: isMuted,
+          onClick: () => {
+            const muted = toggleMutedChat(currentUser.uid, chat.id);
+            setToastMsg(muted ? "Notifications muted for this chat." : "Notifications unmuted.");
+          },
+        },
+        {
+          id: "unread",
+          label: hasUnread ? "Mark as Read" : "Mark as Unread",
+          icon: hasUnread ? CheckCheck : CircleDot,
+          hidden: isPendingSent,
+          onClick: () => handleToggleReadStatus(chat),
+        },
+        { type: "divider" },
+        {
+          id: "clear",
+          label: "Clear Chat",
+          icon: Eraser,
+          hidden: isPendingSent,
+          onClick: () => setConfirmModal({ type: "clear", chat, user: chat.userInfo }),
+        },
+        {
+          id: "delete",
+          label: "Delete Chat",
+          icon: Trash2,
+          danger: true,
+          hidden: isPendingSent,
+          onClick: () => setConfirmModal({ type: "delete", chat, user: chat.userInfo }),
+        },
+        {
+          id: "unconnect",
+          label: isPendingSent ? "Cancel Request" : "Un-connect",
+          icon: UserMinus,
+          danger: true,
+          onClick: () => setConfirmModal({ type: "unconnect", chat, user: chat.userInfo }),
+        },
+        {
+          id: "block",
+          label: "Block User",
+          icon: Ban,
+          danger: true,
+          onClick: () => setConfirmModal({ type: "block", chat, user: chat.userInfo }),
+        },
+      ],
+    });
+  };
+
+  const handleChatRowContextMenu = (e, chat) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openChatRowMenu(e.clientX, e.clientY, chat);
+  };
+
+  const handleChatRowMenuButton = (e, chat) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    openChatRowMenu(rect.right - 210, rect.bottom + 6, chat);
+  };
+
+  const openPendingRequestMenu = (x, y, chat) => {
+    openContextMenu({
+      x,
+      y,
+      header: {
+        avatar:
+          chat.userInfo?.photoURL ||
+          "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png",
+        title: chat.userInfo?.displayName || "Request",
+        subtitle: "Message Request",
+      },
+      items: [
+        {
+          id: "profile",
+          label: "View Profile",
+          icon: User,
+          onClick: () => setSelectedProfileUser(chat.userInfo),
+        },
+        {
+          id: "accept",
+          label: "Accept Request",
+          icon: Check,
+          active: true,
+          onClick: () => handleAcceptFromModal(chat.id, chat.userInfo),
+        },
+        { type: "divider" },
+        {
+          id: "decline",
+          label: "Decline Request",
+          icon: X,
+          danger: true,
+          onClick: () => handleDeclineFromModal(chat.id),
+        },
+        {
+          id: "block",
+          label: "Block User",
+          icon: Ban,
+          danger: true,
+          onClick: () => setConfirmModal({ type: "block", chat, user: chat.userInfo }),
+        },
+      ],
+    });
+  };
+
+  const handleContactContextMenu = (e, userObj, existingChat) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      header: {
+        avatar:
+          userObj.photoURL ||
+          "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png",
+        title: userObj.displayName || "User",
+        subtitle: userObj.talklyId || "",
+      },
+      items: [
+        {
+          id: "profile",
+          label: "View Profile",
+          icon: User,
+          onClick: () => setSelectedProfileUser(userObj),
+        },
+        existingChat
+          ? {
+              id: "open",
+              label: "Open Chat",
+              icon: MessageSquare,
+              onClick: () => handleOpenChatFromModal(userObj),
+            }
+          : {
+              id: "request",
+              label: "Send Chat Request",
+              icon: UserPlus,
+              onClick: () => handleSendRequest(userObj),
+            },
+        {
+          id: "copy-id",
+          label: "Copy @username",
+          icon: Copy,
+          hidden: !userObj.talklyId,
+          onClick: async () => {
+            try {
+              await navigator.clipboard.writeText(userObj.talklyId);
+              setToastMsg("Username copied.");
+            } catch {
+              setToastMsg("Copy failed.");
+            }
+          },
+        },
+        { type: "divider" },
+        {
+          id: "block",
+          label: "Block User",
+          icon: Ban,
+          danger: true,
+          onClick: () => setConfirmModal({ type: "block", chat: existingChat, user: userObj }),
+        },
+      ],
+    });
+  };
+
+  const handleSidebarBackgroundContextMenu = (e) => {
+    const tag = e.target?.tagName?.toLowerCase();
+    if (tag === "input" || tag === "textarea") return;
+    e.preventDefault();
+    e.stopPropagation();
+    openContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      items: [
+        {
+          id: "new-chat",
+          label: showContacts ? "Close Contacts" : "New Chat",
+          icon: showContacts ? X : MessageSquarePlus,
+          onClick: () => setShowContacts((prev) => !prev),
+        },
+        {
+          id: "search",
+          label: "Search People",
+          icon: Search,
+          onClick: () => searchInputRef.current?.focus(),
+        },
+        {
+          id: "theme",
+          label: darkMode ? "Light Mode" : "Dark Mode",
+          icon: darkMode ? Sun : Moon,
+          onClick: toggleTheme,
+        },
+        {
+          id: "settings",
+          label: data.showSettings ? "Close Settings" : "Settings",
+          icon: Settings,
+          onClick: () =>
+            data.showSettings
+              ? dispatch({ type: "CLOSE_SETTINGS" })
+              : dispatch({ type: "OPEN_SETTINGS", payload: "general" }),
+        },
+        ...(appLockConfig?.enabled
+          ? [
+              { type: "divider" },
+              {
+                id: "lock",
+                label: "Lock App",
+                icon: Lock,
+                onClick: lockAppNow,
+              },
+            ]
+          : []),
+      ],
+    });
   };
 
   const selectedExistingChat = selectedProfileUser
@@ -948,150 +1166,33 @@ export default function Sidebar() {
 
   const filteredUsers = allUsers;
   const pendingRequests = chats.filter((c) => c.status === "pending" && c.senderId !== currentUser.uid);
-  const activeChats = chats.filter(
-    (c) => c.status === "accepted" || !c.status || (c.status === "pending" && c.senderId === currentUser.uid)
-  );
-
-  if (showProfile) {
-    return (
-      <div className="flex flex-col w-full h-full bg-white dark:bg-gray-900 transition-colors duration-200 relative">
-        <div className="h-[65px] bg-blue-600 dark:bg-blue-800 flex items-center px-4 py-2 text-white">
-          <ArrowLeft
-            className="w-6 h-6 cursor-pointer mr-4"
-            onClick={() => {
-              setShowProfile(false);
-              setProfileError("");
-            }}
-          />
-          <h1 className="text-xl font-medium">Profile</h1>
-        </div>
-
-        <div className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-950 flex flex-col items-center py-8 px-4 transition-colors duration-200">
-          <img
-            src={
-              currentUser.photoURL ||
-              "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
-            }
-            alt="Profile"
-            className="w-40 h-40 rounded-full object-cover mb-4 shadow-md"
-          />
-          {myProfile?.talklyId && (
-            <p className="text-blue-600 dark:text-blue-400 font-medium mb-6 bg-blue-50 dark:bg-blue-900/30 px-4 py-1 rounded-full">
-              {myProfile.talklyId}
-            </p>
-          )}
-
-          {profileError && (
-            <div className="w-full max-w-md mb-4 p-3 rounded-xl bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-300 text-sm text-center">
-              {profileError}
-            </div>
-          )}
-
-          <div className="w-full max-w-md bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 mb-6 transition-colors duration-200">
-            <label className="block text-sm font-medium text-blue-600 dark:text-blue-400 mb-2">
-              Your Name
-            </label>
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              className="w-full border-b-2 border-gray-200 dark:border-gray-700 focus:border-blue-600 dark:focus:border-blue-400 bg-transparent outline-none py-2 text-lg text-gray-800 dark:text-gray-100 transition-colors"
-            />
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-              This is not your username or pin. This name will be visible to your Talkly contacts.
-            </p>
-          </div>
-
-          <div className="w-full max-w-md bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 mb-6 transition-colors duration-200">
-            <label className="block text-sm font-medium text-blue-600 dark:text-blue-400 mb-2">
-              Username (Talkly ID)
-            </label>
-            <div className="flex items-center border-b-2 border-gray-200 dark:border-gray-700 focus-within:border-blue-600 dark:focus-within:border-blue-400 transition-colors">
-              <span className="text-gray-500 dark:text-gray-400 text-lg mr-1">@</span>
-              <input
-                type="text"
-                value={newTalklyId}
-                onChange={(e) => setNewTalklyId(e.target.value.replace(/[^a-zA-Z0-9_]/g, ""))}
-                className="w-full bg-transparent outline-none py-2 text-lg text-gray-800 dark:text-gray-100"
-              />
-            </div>
-          </div>
-
-          <div className="w-full max-w-md bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 mb-8 transition-colors duration-200">
-            <label className="block text-sm font-medium text-blue-600 dark:text-blue-400 mb-2">
-              About
-            </label>
-            <input
-              type="text"
-              value={newAbout}
-              onChange={(e) => setNewAbout(e.target.value)}
-              className="w-full border-b-2 border-gray-200 dark:border-gray-700 focus:border-blue-600 dark:focus:border-blue-400 bg-transparent outline-none py-2 text-lg text-gray-800 dark:text-gray-100 transition-colors"
-            />
-          </div>
-
-          <button
-            onClick={handleSaveProfile}
-            className="bg-blue-600 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600 text-white font-medium py-3 px-8 rounded-full transition-colors shadow-sm mb-4"
-          >
-            Save Changes
-          </button>
-
-          <button
-            onClick={handleShareProfile}
-            className="flex items-center gap-2 text-blue-600 dark:text-blue-400 font-medium py-3 px-8 rounded-full hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors mb-8"
-          >
-            <Share2 className="w-5 h-5" /> Share Profile
-          </button>
-
-          <div className="w-full max-w-md bg-white dark:bg-gray-900 p-6 rounded-2xl shadow-sm border border-gray-100 dark:border-gray-800 mb-8 transition-colors duration-200">
-            <h3 className="text-lg font-medium text-gray-900 dark:text-gray-100 mb-4">Blocked Users</h3>
-            {blockedUsersList.length === 0 ? (
-              <p className="text-sm text-gray-500 dark:text-gray-400">No blocked users.</p>
-            ) : (
-              <div className="flex flex-col gap-3">
-                {blockedUsersList.map((user) => (
-                  <div
-                    key={user.uid}
-                    className="flex items-center justify-between p-2 hover:bg-gray-50 dark:hover:bg-gray-800 rounded-lg transition-colors"
-                  >
-                    <div className="flex items-center gap-3">
-                      <img
-                        src={
-                          user.photoURL ||
-                          "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
-                        }
-                        alt=""
-                        className="w-10 h-10 rounded-full object-cover"
-                      />
-                      <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                        {user.displayName}
-                      </span>
-                    </div>
-                    <button
-                      onClick={() => handleUnblock(user.uid)}
-                      className="text-sm text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium px-3 py-1 rounded-full hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
-                    >
-                      Unblock
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-        <ShareProfileModal
-          isOpen={showShareModal}
-          onClose={() => setShowShareModal(false)}
-          profile={myProfile}
-          currentUser={currentUser}
-          onCopySuccess={(msg) => setToastMsg(msg)}
-        />
-      </div>
-    );
-  }
+  const activeChats = chats
+    .filter((c) => {
+      const isVisibleType =
+        c.status === "accepted" ||
+        !c.status ||
+        (c.status === "pending" && c.senderId === currentUser.uid);
+      if (!isVisibleType) return false;
+      const hiddenAt = hiddenChatsMap[c.id];
+      if (hiddenAt) {
+        const updatedMs = c.updatedAt?.toMillis?.() || 0;
+        const hasNewMsg = Boolean(c.lastMessage?.text) && updatedMs > hiddenAt;
+        if (!hasNewMsg) return false;
+      }
+      return true;
+    })
+    .sort((a, b) => {
+      const aPinned = pinnedChatIds.includes(a.id) ? 1 : 0;
+      const bPinned = pinnedChatIds.includes(b.id) ? 1 : 0;
+      if (aPinned !== bPinned) return bPinned - aPinned;
+      return (b.updatedAt?.toMillis?.() || 0) - (a.updatedAt?.toMillis?.() || 0);
+    });
 
   return (
-    <div className="flex flex-col w-full h-full bg-white dark:bg-gray-900 transition-colors duration-200 relative">
+    <div
+      onContextMenu={handleSidebarBackgroundContextMenu}
+      className="flex flex-col w-full h-full bg-white dark:bg-gray-900 transition-colors duration-200 relative"
+    >
       {/* Header */}
       <div className="h-[65px] bg-white dark:bg-gray-900 flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 transition-colors duration-200">
         <div className="flex items-center gap-2.5">
@@ -1103,116 +1204,82 @@ export default function Sidebar() {
               }
               alt=""
               className="w-10 h-10 rounded-full object-cover cursor-pointer hover:opacity-80 transition"
-              onClick={() => setShowProfile(true)}
-              title="Edit Profile"
+              onClick={() => dispatch({ type: "OPEN_SETTINGS", payload: "profile" })}
+              title="Profile & Settings"
             />
             <span
               className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 ${
-                isOnline ? "bg-emerald-500" : "bg-amber-500"
+                isOnline ? "bg-emerald-500" : "bg-slate-400"
               }`}
               title={isOnline ? "Connected" : "Offline"}
             />
           </div>
           {!isOnline && (
-            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 rounded-full">
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-full">
               <WifiOff className="w-3 h-3" />
               Offline
             </span>
           )}
         </div>
 
-        <div className="flex gap-4 text-gray-500 dark:text-gray-400 relative items-center" ref={mainMenuRef}>
+        <div className="flex gap-3.5 text-gray-500 dark:text-gray-400 relative items-center">
           <button
             type="button"
             onClick={handleToggleDesktopNotifications}
-            className={`hover:text-blue-600 dark:hover:text-blue-400 transition relative ${
+            className={`p-1.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-blue-600 dark:hover:text-blue-400 transition ${
               desktopNotifEnabled ? "text-blue-600 dark:text-blue-400" : ""
             }`}
             title={
               desktopNotifEnabled
-                ? "Desktop Notifications On (click to mute)"
+                ? "Notifications On"
                 : notifPermission === "denied"
-                ? "Notifications blocked in browser settings"
-                : "Enable Desktop Notifications"
+                ? "Notifications Blocked"
+                : "Enable Notifications"
             }
+            aria-label="Toggle Notifications"
           >
             {desktopNotifEnabled ? <Bell className="w-5 h-5" /> : <BellOff className="w-5 h-5" />}
           </button>
-          <button
-            onClick={toggleTheme}
-            className="hover:text-blue-600 dark:hover:text-blue-400 transition"
-            title="Toggle Theme"
-          >
-            {darkMode ? <Sun className="w-6 h-6" /> : <Moon className="w-6 h-6" />}
-          </button>
+
           {showContacts ? (
-            <X
-              className="w-6 h-6 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition"
+            <button
+              type="button"
               onClick={() => setShowContacts(false)}
+              className="p-1.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-blue-600 dark:hover:text-blue-400 transition"
               title="Close Contacts"
-            />
+              aria-label="Close Contacts"
+            >
+              <X className="w-5 h-5" />
+            </button>
           ) : (
-            <MessageSquarePlus
-              className="w-6 h-6 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition"
+            <button
+              type="button"
               onClick={() => setShowContacts(true)}
+              className="p-1.5 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-blue-600 dark:hover:text-blue-400 transition"
               title="New Chat"
-            />
+              aria-label="New Chat"
+            >
+              <MessageSquarePlus className="w-5 h-5" />
+            </button>
           )}
-          <MoreVertical
-            className="w-6 h-6 cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition"
-            onClick={() => setShowMainMenu(!showMainMenu)}
-          />
-          {showMainMenu && (
-            <div className="absolute right-8 top-8 bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 shadow-lg rounded-xl py-2 w-48 z-50">
-              <button
-                onClick={() => {
-                  setShowProfile(true);
-                  setShowMainMenu(false);
-                }}
-                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-              >
-                Edit Profile
-              </button>
-              <button
-                onClick={handleShareProfile}
-                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-              >
-                Share Profile
-              </button>
-              <button
-                onClick={() => {
-                  setShowMainMenu(false);
-                  setShowLockEditor(false);
-                  setLockError("");
-                  setCurrentLockPwd("");
-                  setNewLockPwd("");
-                  setConfirmLockPwd("");
-                  setLockFrequency(appLockConfig?.frequency || "every_visit");
-                  setShowSettings(true);
-                }}
-                className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-              >
-                Settings
-              </button>
-              {appLockConfig?.enabled && (
-                <button
-                  onClick={() => {
-                    setShowMainMenu(false);
-                    lockAppNow();
-                  }}
-                  className="w-full text-left px-4 py-2 text-sm text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors flex items-center gap-2"
-                >
-                  <Lock className="w-4 h-4" />
-                  <span>Lock Now</span>
-                </button>
-              )}
-            </div>
-          )}
-          <LogOut
-            className="w-6 h-6 cursor-pointer text-red-500 hover:text-red-600 dark:hover:text-red-400 transition"
-            onClick={logout}
-            title="Logout"
-          />
+
+          <button
+            type="button"
+            onClick={() =>
+              data.showSettings
+                ? dispatch({ type: "CLOSE_SETTINGS" })
+                : dispatch({ type: "OPEN_SETTINGS", payload: "general" })
+            }
+            className={`p-1.5 rounded-full transition ${
+              data.showSettings
+                ? "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
+                : "hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-blue-600 dark:hover:text-blue-400"
+            }`}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <Settings className="w-5 h-5" />
+          </button>
         </div>
       </div>
 
@@ -1223,391 +1290,73 @@ export default function Sidebar() {
         </div>
       )}
 
-      {/* Settings Modal */}
-      {showSettings && (
-        <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Settings</h3>
+      {/* Confirmation Modal for Sidebar Actions */}
+      {confirmModal && (
+        <div
+          className="absolute inset-0 bg-black/45 backdrop-blur-[2px] z-50 flex items-center justify-center p-4"
+          onClick={() => !isRunningAction && setConfirmModal(null)}
+        >
+          <div
+            className="bg-white dark:bg-gray-900 border border-gray-100 dark:border-gray-800 rounded-2xl shadow-xl max-w-sm w-full p-6"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">
+              {confirmModal.type === "clear"
+                ? `Clear chat with ${confirmModal.user?.displayName || "user"}?`
+                : confirmModal.type === "delete"
+                ? `Delete chat with ${confirmModal.user?.displayName || "user"}?`
+                : confirmModal.type === "unconnect"
+                ? `Un-connect ${confirmModal.user?.displayName || "user"}?`
+                : `Block ${confirmModal.user?.displayName || "user"}?`}
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
+              {confirmModal.type === "clear"
+                ? "All messages will be cleared, while keeping this chat in your list and your connection active."
+                : confirmModal.type === "delete"
+                ? "All messages will be cleared and this conversation will be removed from your chat list."
+                : confirmModal.type === "unconnect"
+                ? "This removes your connection and deletes the conversation. You will need to send a new request to chat again."
+                : "You will no longer receive messages or chat requests from this user."}
+            </p>
+            <div className="flex justify-end gap-2.5">
               <button
-                onClick={() => {
-                  setShowSettings(false);
-                  setShowLockEditor(false);
-                  setLockError("");
-                }}
-                className="p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500"
+                type="button"
+                disabled={isRunningAction}
+                onClick={() => setConfirmModal(null)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 rounded-xl hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors disabled:opacity-50"
               >
-                <X className="w-5 h-5" />
+                Cancel
               </button>
-            </div>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between py-2 border-b border-gray-100 dark:border-gray-800">
-                <div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Appearance</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {darkMode ? "Dark theme active" : "Light theme active"}
-                  </p>
-                </div>
-                <button
-                  onClick={toggleTheme}
-                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
-                >
-                  Switch to {darkMode ? "Light" : "Dark"}
-                </button>
-              </div>
-              <div className="flex items-center justify-between py-2 border-b border-gray-100 dark:border-gray-800">
-                <div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Talkly ID</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {myProfile?.talklyId || "Loading..."}
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowSettings(false);
-                    setShowProfile(true);
-                  }}
-                  className="px-3 py-1.5 text-xs font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300"
-                >
-                  Edit
-                </button>
-              </div>
-
-              {/* Optional Website Opening Password */}
-              <div className="py-2 border-b border-gray-100 dark:border-gray-800">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-medium text-gray-900 dark:text-gray-100 flex items-center gap-1.5">
-                      <Lock className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                      Website Opening Password
-                    </p>
-                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                      {appLockConfig?.enabled
-                        ? `Active • ${getFrequencyLabel(appLockConfig.frequency)}`
-                        : "Optional • Not set"}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {appLockConfig?.enabled && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowSettings(false);
-                          lockAppNow();
-                        }}
-                        className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
-                      >
-                        Lock
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowLockEditor((prev) => !prev);
-                        setLockError("");
-                        setCurrentLockPwd("");
-                        setNewLockPwd("");
-                        setConfirmLockPwd("");
-                        setLockFrequency(appLockConfig?.frequency || "every_visit");
-                      }}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
-                    >
-                      {showLockEditor ? "Close" : appLockConfig?.enabled ? "Manage" : "Set Password"}
-                    </button>
-                  </div>
-                </div>
-
-                {showLockEditor && (
-                  <div className="mt-4 p-4 rounded-xl bg-gray-50 dark:bg-gray-950 border border-gray-200 dark:border-gray-800 space-y-3">
-                    {lockError && (
-                      <div className="p-2.5 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40 text-red-600 dark:text-red-400 text-xs">
-                        {lockError}
-                      </div>
-                    )}
-
-                    {appLockConfig?.enabled && (
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                          Current Password
-                        </label>
-                        <div className="relative">
-                          <input
-                            type={showLockPasswords ? "text" : "password"}
-                            value={currentLockPwd}
-                            onChange={(e) => {
-                              setCurrentLockPwd(e.target.value);
-                              if (lockError) setLockError("");
-                            }}
-                            placeholder="Enter current opening password"
-                            className="w-full pr-9 pl-3 py-2 text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowLockPasswords((p) => !p)}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400"
-                          >
-                            {showLockPasswords ? (
-                              <EyeOff className="w-3.5 h-3.5" />
-                            ) : (
-                              <Eye className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                        {appLockConfig?.enabled
-                          ? "New Password (optional if only changing schedule)"
-                          : "Opening Password (min 4 characters)"}
-                      </label>
-                      <div className="relative">
-                        <input
-                          type={showLockPasswords ? "text" : "password"}
-                          value={newLockPwd}
-                          onChange={(e) => {
-                            setNewLockPwd(e.target.value);
-                            if (lockError) setLockError("");
-                          }}
-                          placeholder={appLockConfig?.enabled ? "Leave blank to keep current" : "Create password"}
-                          className="w-full pr-9 pl-3 py-2 text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
-                        />
-                        {!appLockConfig?.enabled && (
-                          <button
-                            type="button"
-                            onClick={() => setShowLockPasswords((p) => !p)}
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400"
-                          >
-                            {showLockPasswords ? (
-                              <EyeOff className="w-3.5 h-3.5" />
-                            ) : (
-                              <Eye className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {(!appLockConfig?.enabled || newLockPwd.length > 0) && (
-                      <div>
-                        <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1">
-                          Confirm Password
-                        </label>
-                        <input
-                          type={showLockPasswords ? "text" : "password"}
-                          value={confirmLockPwd}
-                          onChange={(e) => {
-                            setConfirmLockPwd(e.target.value);
-                            if (lockError) setLockError("");
-                          }}
-                          placeholder="Re-enter password"
-                          className="w-full px-3 py-2 text-xs rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
-                        />
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 dark:text-gray-300 mb-1.5">
-                        Ask Password
-                      </label>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {APP_LOCK_FREQUENCIES.map((freq) => {
-                          const selected = lockFrequency === freq.id;
-                          return (
-                            <button
-                              key={freq.id}
-                              type="button"
-                              onClick={() => setLockFrequency(freq.id)}
-                              className={`text-left px-2.5 py-2 rounded-lg border text-xs transition-colors ${
-                                selected
-                                  ? "border-blue-500 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-semibold"
-                                  : "border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 hover:border-gray-300 dark:hover:border-gray-700"
-                              }`}
-                            >
-                              <div>{freq.label}</div>
-                              <div className="text-[10px] font-normal text-gray-500 dark:text-gray-400 truncate">
-                                {freq.desc}
-                              </div>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 pt-1">
-                      <button
-                        type="button"
-                        disabled={savingLock}
-                        onClick={async () => {
-                          setLockError("");
-                          if (appLockConfig?.enabled) {
-                            if (!currentLockPwd) {
-                              setLockError("Enter your current password to make changes.");
-                              return;
-                            }
-                            const valid = await verifyCurrentAppLockPassword(currentLockPwd);
-                            if (!valid) {
-                              setLockError("Current password is incorrect.");
-                              return;
-                            }
-                          }
-                          if (!appLockConfig?.enabled && newLockPwd.length < 4) {
-                            setLockError("Password must be at least 4 characters.");
-                            return;
-                          }
-                          if (newLockPwd && newLockPwd.length < 4) {
-                            setLockError("New password must be at least 4 characters.");
-                            return;
-                          }
-                          if (newLockPwd && newLockPwd !== confirmLockPwd) {
-                            setLockError("Passwords do not match.");
-                            return;
-                          }
-                          setSavingLock(true);
-                          try {
-                            await saveAppLock({
-                              password: newLockPwd || undefined,
-                              frequency: lockFrequency,
-                            });
-                            setShowLockEditor(false);
-                            setCurrentLockPwd("");
-                            setNewLockPwd("");
-                            setConfirmLockPwd("");
-                            setToastMsg(
-                              `Opening password saved (${getFrequencyLabel(lockFrequency)}).`
-                            );
-                          } catch (err) {
-                            setLockError(err?.message || "Failed to save password.");
-                          } finally {
-                            setSavingLock(false);
-                          }
-                        }}
-                        className="flex-1 py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold transition-colors"
-                      >
-                        {savingLock
-                          ? "Saving..."
-                          : appLockConfig?.enabled
-                          ? "Save Changes"
-                          : "Enable Password"}
-                      </button>
-
-                      {appLockConfig?.enabled && (
-                        <button
-                          type="button"
-                          disabled={savingLock}
-                          onClick={async () => {
-                            setLockError("");
-                            if (!currentLockPwd) {
-                              setLockError("Enter your current password to disable lock.");
-                              return;
-                            }
-                            const valid = await verifyCurrentAppLockPassword(currentLockPwd);
-                            if (!valid) {
-                              setLockError("Current password is incorrect.");
-                              return;
-                            }
-                            setSavingLock(true);
-                            try {
-                              await disableAppLock();
-                              setShowLockEditor(false);
-                              setCurrentLockPwd("");
-                              setNewLockPwd("");
-                              setConfirmLockPwd("");
-                              setToastMsg("Opening password disabled.");
-                            } catch (err) {
-                              setLockError(err?.message || "Failed to disable password.");
-                            } finally {
-                              setSavingLock(false);
-                            }
-                          }}
-                          className="py-2 px-3 rounded-lg bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 text-xs font-semibold transition-colors"
-                        >
-                          Disable
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Web-to-Desktop Notifications */}
-              <div className="flex items-center justify-between gap-2 py-2 border-b border-gray-100 dark:border-gray-800">
-                <div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100 flex items-center gap-1.5">
-                    {desktopNotifEnabled ? (
-                      <Bell className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-                    ) : (
-                      <BellOff className="w-4 h-4 text-gray-400" />
-                    )}
-                    Desktop Notifications
-                  </p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                    {!isNotificationSupported()
-                      ? "Not supported in this browser"
-                      : notifPermission === "denied"
-                      ? "Blocked in browser settings"
-                      : desktopNotifEnabled
-                      ? "Active • Private alert when locked; muted on open chat"
-                      : "Off • Click Enable for desktop alerts"}
-                  </p>
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  {desktopNotifEnabled && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        showDesktopNotification({
-                          title: "Talkly Test Notification",
-                          body: "Desktop alerts are working cleanly.",
-                          icon: TALKLY_LOCKED_ICON,
-                          tag: "talkly-test-notification",
-                        })
-                      }
-                      className="px-2.5 py-1.5 text-xs font-medium rounded-lg bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-                    >
-                      Test
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={handleToggleDesktopNotifications}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
-                      desktopNotifEnabled
-                        ? "bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400"
-                        : "bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400"
-                    }`}
-                  >
-                    {desktopNotifEnabled ? "Disable" : "Enable"}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-between py-2">
-                <div>
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">Connection Status</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400">
-                    {isOnline ? "Real-time sync connected" : "Currently offline"}
-                  </p>
-                </div>
-                <span
-                  className={`w-2.5 h-2.5 rounded-full ${
-                    isOnline ? "bg-emerald-500" : "bg-amber-500"
-                  }`}
-                />
-              </div>
+              <button
+                type="button"
+                disabled={isRunningAction}
+                onClick={() => {
+                  if (confirmModal.type === "clear") {
+                    handleClearChatAction(confirmModal.chat);
+                  } else if (confirmModal.type === "delete") {
+                    handleDeleteChatAction(confirmModal.chat);
+                  } else if (confirmModal.type === "unconnect") {
+                    handleUnconnectAction(confirmModal.chat);
+                  } else if (confirmModal.type === "block") {
+                    handleBlockUserAction(confirmModal.user, confirmModal.chat?.id);
+                  }
+                }}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-xl transition-colors disabled:opacity-60"
+              >
+                {isRunningAction
+                  ? "Working..."
+                  : confirmModal.type === "clear"
+                  ? "Clear Chat"
+                  : confirmModal.type === "delete"
+                  ? "Delete Chat"
+                  : confirmModal.type === "unconnect"
+                  ? "Un-connect"
+                  : "Block"}
+              </button>
             </div>
           </div>
         </div>
       )}
-
-      <ShareProfileModal
-        isOpen={showShareModal}
-        onClose={() => setShowShareModal(false)}
-        profile={myProfile}
-        currentUser={currentUser}
-        onCopySuccess={(msg) => setToastMsg(msg)}
-      />
 
       {/* User Profile Details Modal (Two-Step Before Sending Request) */}
       {selectedProfileUser && (
@@ -1642,7 +1391,7 @@ export default function Sidebar() {
                   selectedProfileOnline === "online"
                     ? "bg-emerald-500"
                     : selectedProfileOnline === "away"
-                    ? "bg-amber-400"
+                    ? "bg-sky-400"
                     : "bg-gray-400 dark:bg-gray-600"
                 }`}
                 title={
@@ -1667,7 +1416,7 @@ export default function Sidebar() {
               {selectedProfileOnline === "online" ? (
                 <span className="text-emerald-600 dark:text-emerald-400 font-medium">Online</span>
               ) : selectedProfileOnline === "away" ? (
-                <span className="text-amber-600 dark:text-amber-400 font-medium">Away</span>
+                <span className="text-sky-600 dark:text-sky-400 font-medium">Away</span>
               ) : (
                 formatLastSeen(selectedProfileLastSeen)
               )}
@@ -1695,7 +1444,7 @@ export default function Sidebar() {
             ) : selectedExistingChat.status === "pending" &&
               selectedExistingChat.senderId === currentUser.uid ? (
               <div className="space-y-3">
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 text-xs font-medium">
+                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 text-xs font-medium">
                   <Clock className="w-3.5 h-3.5" />
                   Request Pending • Waiting for approval
                 </div>
@@ -1805,6 +1554,7 @@ export default function Sidebar() {
                     key={user.uid}
                     className="flex items-center p-3 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer transition-colors"
                     onClick={() => setSelectedProfileUser(user)}
+                    onContextMenu={(e) => handleContactContextMenu(e, user, existing)}
                   >
                     <img
                       src={
@@ -1824,7 +1574,7 @@ export default function Sidebar() {
                             Connected
                           </span>
                         ) : existing?.status === "pending" ? (
-                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 shrink-0">
+                          <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-indigo-50 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-300 shrink-0">
                             {existing.senderId === currentUser.uid ? "Pending" : "Requested you"}
                           </span>
                         ) : null}
@@ -1853,9 +1603,14 @@ export default function Sidebar() {
             )}
             {pendingRequests.map((chat) => (
               <div
-                className="flex items-center p-3 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer bg-blue-50 dark:bg-blue-900/20 transition-colors"
+                className="group flex items-center p-3 hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer bg-blue-50 dark:bg-blue-900/20 transition-colors"
                 key={chat.id}
                 onClick={() => dispatch({ type: "CHANGE_USER", payload: chat.userInfo })}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  openPendingRequestMenu(e.clientX, e.clientY, chat);
+                }}
               >
                 <img
                   src={
@@ -1863,15 +1618,15 @@ export default function Sidebar() {
                     "https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
                   }
                   alt=""
-                  className="w-12 h-12 rounded-full object-cover mr-4"
+                  className="w-12 h-12 rounded-full object-cover mr-4 shrink-0"
                 />
-                <div className="flex-1 border-b border-gray-100 dark:border-gray-800 pb-3 pt-1 flex flex-col justify-center">
-                  <div className="flex justify-between items-center">
-                    <span className="text-[17px] text-gray-900 dark:text-gray-100 font-medium">
+                <div className="flex-1 min-w-0 border-b border-gray-100 dark:border-gray-800 pb-3 pt-1 flex flex-col justify-center">
+                  <div className="flex justify-between items-center gap-2">
+                    <span className="text-[17px] text-gray-900 dark:text-gray-100 font-medium truncate">
                       {chat.userInfo?.displayName}
                     </span>
                     {chat.updatedAt && (
-                      <span className="text-xs text-blue-600 dark:text-blue-400">
+                      <span className="text-xs text-blue-600 dark:text-blue-400 shrink-0 tabular-nums">
                         {new Date(chat.updatedAt.toDate()).toLocaleTimeString([], {
                           hour: "2-digit",
                           minute: "2-digit",
@@ -1879,9 +1634,24 @@ export default function Sidebar() {
                       </span>
                     )}
                   </div>
-                  <p className="text-sm text-blue-600 dark:text-blue-400 truncate mt-0.5">
-                    Wants to connect with you
-                  </p>
+                  <div className="flex items-center justify-between gap-2 mt-0.5">
+                    <p className="text-sm text-blue-600 dark:text-blue-400 truncate">
+                      Wants to connect with you
+                    </p>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        openPendingRequestMenu(rect.right - 210, rect.bottom + 6, chat);
+                      }}
+                      title="Request options"
+                      aria-label={`Request options for ${chat.userInfo?.displayName || "user"}`}
+                      className="p-1 rounded-full text-blue-500 hover:bg-blue-100 dark:hover:bg-blue-900/50 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -1897,8 +1667,12 @@ export default function Sidebar() {
                 key={chat.id}
                 chat={chat}
                 currentUserId={currentUser.uid}
-                isSelected={data.chatId === chat.id}
+                isSelected={!data.showSettings && data.chatId === chat.id}
+                isPinned={pinnedChatIds.includes(chat.id)}
+                isMuted={mutedChatIds.includes(chat.id)}
                 onSelect={() => dispatch({ type: "CHANGE_USER", payload: chat.userInfo })}
+                onContextMenu={handleChatRowContextMenu}
+                onOpenMenuButton={handleChatRowMenuButton}
               />
             ))}
 

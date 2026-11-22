@@ -1,6 +1,21 @@
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
-import { Check, CheckCheck, Clock, Eye, Flame, Timer, Pencil, Trash2, X } from "lucide-react";
+import { useContextMenu } from "../context/ContextMenuContext";
+import {
+  Check,
+  CheckCheck,
+  Clock,
+  Eye,
+  Pencil,
+  Trash2,
+  X,
+  Copy,
+  Reply,
+  Info,
+  MoreHorizontal,
+} from "lucide-react";
+
+import { isEmojiOnlyMessage } from "../utils/emojiEffects";
 
 const AFTER_SEEN_MS = 10000;
 
@@ -12,22 +27,62 @@ export default function Message({
   fallbackReadAtMs,
   disappearDeadlineMs,
   disappearDurationMs,
-  isTimerPaused = false,
+  otherUserName = "",
+  isHighlighted = false,
+  isKeyboardSelected = false,
   onEditMessage,
   onDeleteMessage,
+  onDeleteForMe,
+  onCopyMessage,
+  onReplyMessage,
+  onJumpToMessage,
+  onTriggerEmojiEffect,
 }) {
   const { currentUser } = useAuth();
+  const { openContextMenu } = useContextMenu();
   const [showDetails, setShowDetails] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editText, setEditText] = useState(message.text || "");
   const [savingEdit, setSavingEdit] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [justCopied, setJustCopied] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
   const isOwner = message.senderId === currentUser.uid;
+
+  const rawText = message.text || "";
+  const lineCount = rawText.split("\n").length;
+  const isLongMessage = rawText.length > 420 || lineCount > 9;
+  const displayedText =
+    isLongMessage && !isExpanded
+      ? (() => {
+          const lines = rawText.split("\n");
+          const sliced = lines.length > 9 ? lines.slice(0, 9).join("\n") : rawText;
+          return sliced.length > 420 ? `${sliced.slice(0, 420).trimEnd()}…` : `${sliced}…`;
+        })()
+      : rawText;
 
   const formatTime = (timestamp) => {
     if (!timestamp || typeof timestamp.toDate !== "function") return "";
     return timestamp.toDate().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+
+  const handleCopy = (e) => {
+    e?.stopPropagation();
+    if (onCopyMessage) {
+      onCopyMessage(message);
+    } else if (message.text) {
+      navigator.clipboard?.writeText(message.text).catch(() => {});
+    }
+    setJustCopied(true);
+    setTimeout(() => setJustCopied(false), 1600);
+  };
+
+  const handleReply = (e) => {
+    e?.stopPropagation();
+    setShowDetails(false);
+    setConfirmDelete(false);
+    onReplyMessage?.(message);
   };
 
   const startEditing = (e) => {
@@ -99,7 +154,6 @@ export default function Message({
   const isPending = !message.timestamp;
 
   let remainingSec = null;
-  let progressPct = 100;
   if (isAfterSeen && isSeen) {
     const currentMs = nowMs || Date.now();
     const totalDuration = disappearDurationMs || AFTER_SEEN_MS;
@@ -114,82 +168,232 @@ export default function Message({
       remainingMs = Math.max(0, totalDuration - elapsed);
     }
     remainingSec = Math.ceil(remainingMs / 1000);
-    progressPct =
-      remainingMs >= totalDuration
-        ? 100
-        : Math.max(0, Math.min(100, (remainingMs / totalDuration) * 100));
   }
 
   const effectiveTimerMode = message.disappearMode || disappearingMode;
+  const hasDisappearTimer = isAfterSeen || (effectiveTimerMode && effectiveTimerMode !== "off");
+  const isJumboEmoji = !isEditing && isEmojiOnlyMessage(message.text);
+
+  const openMessageMenu = (x, y) => {
+    if (isEditing) return;
+    const preview =
+      message.text && message.text.length > 44
+        ? `${message.text.slice(0, 44)}...`
+        : message.text || "Message";
+
+    openContextMenu({
+      x,
+      y,
+      header: {
+        title: isOwner ? "You" : otherUserName || "Message",
+        subtitle: preview,
+      },
+      items: [
+        {
+          id: "reply",
+          label: "Reply",
+          icon: Reply,
+          disabled: isPending,
+          onClick: () => handleReply(),
+        },
+        {
+          id: "copy",
+          label: "Copy Text",
+          icon: Copy,
+          disabled: !message.text,
+          onClick: () => handleCopy(),
+        },
+        {
+          id: "edit",
+          label: "Edit Message",
+          icon: Pencil,
+          hidden: !isOwner,
+          disabled: isPending,
+          onClick: () => startEditing(),
+        },
+        {
+          id: "info",
+          label: showDetails ? "Hide Info" : "Message Info",
+          icon: Info,
+          onClick: () => {
+            setConfirmDelete(false);
+            setShowDetails((prev) => !prev);
+          },
+        },
+        { type: "divider" },
+        isOwner
+          ? {
+              id: "delete",
+              label: "Delete Message",
+              icon: Trash2,
+              danger: true,
+              disabled: isPending,
+              onClick: () => requestDelete(),
+            }
+          : {
+              id: "delete-for-me",
+              label: "Delete for Me",
+              icon: Trash2,
+              danger: true,
+              onClick: () => onDeleteForMe?.(message),
+            },
+      ],
+    });
+  };
+
+  const handleContextMenu = (e) => {
+    if (isEditing) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMessageMenu(e.clientX, e.clientY);
+  };
+
+  const handleMoreButtonClick = (e) => {
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    openMessageMenu(isOwner ? rect.left - 180 : rect.left, rect.bottom + 6);
+  };
+
+  const handleBubbleClick = () => {
+    if (isEditing) return;
+    const selectedText = typeof window !== "undefined" ? window.getSelection()?.toString() : "";
+    if (selectedText) return;
+    if (isJumboEmoji && onTriggerEmojiEffect) {
+      onTriggerEmojiEffect(message.text, isOwner ? "outgoing" : "incoming");
+    }
+    setShowDetails((prev) => !prev);
+  };
+
+  const quickActionBar = !isEditing && !isPending && (
+    <div className="hidden sm:flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
+      <button
+        type="button"
+        onClick={handleReply}
+        title="Reply"
+        aria-label="Reply to message"
+        className="p-1.5 rounded-full text-gray-400 hover:text-blue-600 dark:hover:text-sky-400 hover:bg-gray-200/70 dark:hover:bg-gray-800 transition-colors"
+      >
+        <Reply className="w-3.5 h-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={handleCopy}
+        title={justCopied ? "Copied" : "Copy"}
+        aria-label="Copy message"
+        className="p-1.5 rounded-full text-gray-400 hover:text-blue-600 dark:hover:text-sky-400 hover:bg-gray-200/70 dark:hover:bg-gray-800 transition-colors"
+      >
+        {justCopied ? (
+          <Check className="w-3.5 h-3.5 text-emerald-500" />
+        ) : (
+          <Copy className="w-3.5 h-3.5" />
+        )}
+      </button>
+      {isOwner && (
+        <button
+          type="button"
+          onClick={startEditing}
+          title="Edit"
+          aria-label="Edit message"
+          className="p-1.5 rounded-full text-gray-400 hover:text-blue-600 dark:hover:text-sky-400 hover:bg-gray-200/70 dark:hover:bg-gray-800 transition-colors"
+        >
+          <Pencil className="w-3.5 h-3.5" />
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={handleMoreButtonClick}
+        title="More options"
+        aria-label="More message options"
+        className="p-1.5 rounded-full text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-200/70 dark:hover:bg-gray-800 transition-colors"
+      >
+        <MoreHorizontal className="w-3.5 h-3.5" />
+      </button>
+    </div>
+  );
 
   return (
-    <div className={`flex flex-col w-full ${isOwner ? "items-end" : "items-start"} mb-1 group`}>
-      <div className={`flex items-center gap-1.5 w-full ${isOwner ? "justify-end" : "justify-start"}`}>
-        {isOwner && !isEditing && !isPending && (
-          <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity shrink-0">
-            <button
-              type="button"
-              onClick={startEditing}
-              title="Edit message"
-              aria-label="Edit message"
-              className="p-1.5 rounded-full text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-gray-200/70 dark:hover:bg-gray-800 transition-colors"
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={requestDelete}
-              title="Delete message"
-              aria-label="Delete message"
-              className="p-1.5 rounded-full text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
+    <div
+      data-msg-id={message.id}
+      className={`flex flex-col w-full ${isOwner ? "items-end" : "items-start"} mb-1 group rounded-2xl transition-all duration-200 ${
+        isKeyboardSelected
+          ? "bg-blue-50/90 dark:bg-sky-900/30 ring-1 ring-blue-400/70 dark:ring-sky-400/60 py-1.5 -mx-2.5 px-2.5"
+          : isHighlighted
+          ? "bg-sky-100/70 dark:bg-sky-900/30 py-1 -mx-2 px-2"
+          : ""
+      }`}
+    >
+      <div className={`flex items-center gap-1.5 w-full min-w-0 ${isOwner ? "justify-end" : "justify-start"}`}>
+        {isOwner && quickActionBar}
 
         <div
-          onClick={() => isOwner && !isEditing && setShowDetails((prev) => !prev)}
-          title={isOwner && !isEditing ? "Click for options & receipt details" : undefined}
-          className={`${isEditing ? "w-full max-w-[420px] min-w-[240px]" : "max-w-[82%] md:max-w-[70%]"} flex flex-col px-3.5 py-2 rounded-2xl shadow-sm relative overflow-hidden transition-all duration-200 ${
-            isOwner && !isEditing ? "cursor-pointer" : ""
+          onClick={handleBubbleClick}
+          onContextMenu={handleContextMenu}
+          title={
+            !isEditing
+              ? isJumboEmoji
+                ? "Click to replay effect • Right-click for options"
+                : "Click for details • Right-click for options"
+              : undefined
+          }
+          className={`${
+            isEditing
+              ? "w-full max-w-[420px] min-w-0"
+              : "max-w-[86%] sm:max-w-[74%] md:max-w-[68%] min-w-0"
+          } flex flex-col ${
+            isJumboEmoji ? "px-3 py-2" : "px-3.5 py-2"
+          } rounded-2xl shadow-sm relative overflow-hidden transition-all duration-200 ${
+            !isEditing ? "cursor-pointer" : ""
           } ${
-            isAfterSeen
-              ? isOwner
-                ? "bg-gradient-to-br from-blue-600 to-indigo-700 text-white rounded-tr-sm ring-1 ring-amber-400/50"
-                : "bg-white dark:bg-gray-800 border border-amber-300/70 dark:border-amber-500/40 text-gray-900 dark:text-gray-100 rounded-tl-sm"
-              : isOwner
+            isOwner
               ? "bg-blue-600 dark:bg-blue-700 text-white rounded-tr-sm"
               : "bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-900 dark:text-gray-100 rounded-tl-sm"
           }`}
         >
-          {isAfterSeen && (
-            <div className="flex items-center justify-between gap-2 mb-1 pb-1 border-b border-black/10 dark:border-white/10">
-              <span
-                className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide whitespace-nowrap ${
-                  isOwner ? "text-amber-200" : "text-amber-600 dark:text-amber-400"
+          {/* Quoted Reply Preview */}
+          {message.replyTo && !isEditing && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (message.replyTo?.id) {
+                  onJumpToMessage?.(message.replyTo.id);
+                }
+              }}
+              className={`mb-1.5 px-2.5 py-1.5 rounded-lg text-left transition-colors border max-w-full min-w-0 overflow-hidden ${
+                isOwner
+                  ? "bg-white/12 hover:bg-white/18 border-white/15 text-blue-50"
+                  : "bg-slate-50 dark:bg-gray-900/70 hover:bg-slate-100 dark:hover:bg-gray-900 border-slate-200/80 dark:border-gray-700 text-gray-700 dark:text-gray-300"
+              }`}
+            >
+              <p
+                className={`text-[11px] font-semibold truncate ${
+                  isOwner ? "text-sky-100" : "text-blue-600 dark:text-sky-400"
                 }`}
               >
-                <Flame className="w-3 h-3 shrink-0" />
-                {isSeen
-                  ? isTimerPaused
-                    ? `Paused • ${remainingSec}s`
-                    : `Vanishes in ${remainingSec}s`
-                  : "Seen & Disappear"}
-              </span>
-            </div>
+                {message.replyTo.senderId === currentUser.uid
+                  ? "You"
+                  : message.replyTo.senderName || otherUserName || "User"}
+              </p>
+              <p
+                className={`text-xs line-clamp-2 [overflow-wrap:anywhere] ${
+                  isOwner ? "text-blue-100/85" : "text-gray-500 dark:text-gray-400"
+                }`}
+              >
+                {message.replyTo.text}
+              </p>
+            </button>
           )}
 
           {isEditing ? (
-            <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
-              <input
-                type="text"
+            <div className="flex flex-col gap-2 min-w-0" onClick={(e) => e.stopPropagation()}>
+              <textarea
+                rows={Math.min(5, Math.max(2, editText.split("\n").length))}
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
                 onKeyDown={handleEditKeyDown}
                 autoFocus
                 disabled={savingEdit}
-                className="w-full bg-white/15 dark:bg-black/25 text-white placeholder-blue-200 text-[14.2px] px-2.5 py-1.5 rounded-lg outline-none border border-white/25 focus:border-white/60"
+                className="w-full min-w-0 bg-white/15 dark:bg-black/25 text-white placeholder-blue-200 text-[16px] md:text-[14.2px] leading-snug px-2.5 py-1.5 rounded-lg outline-none border border-white/25 focus:border-white/60 resize-none max-h-[140px] overflow-y-auto [overflow-wrap:anywhere]"
                 placeholder="Edit message..."
               />
               <div className="flex items-center justify-end gap-1.5">
@@ -214,23 +418,37 @@ export default function Message({
               </div>
             </div>
           ) : (
-            <div className="flex flex-wrap items-end justify-between gap-x-2.5 gap-y-0.5">
-              <p
-                className={`text-[14.2px] leading-snug break-words min-w-0 whitespace-pre-wrap ${
-                  isOwner ? "text-white" : "text-gray-900 dark:text-gray-100"
-                }`}
-              >
-                {message.text}
-              </p>
-              <div className="flex items-center gap-1.5 ml-auto shrink-0">
-                {!isAfterSeen && effectiveTimerMode && effectiveTimerMode !== "off" && (
-                  <Timer
-                    className={`w-3 h-3 ${
-                      isOwner ? "text-blue-200/80" : "text-gray-400 dark:text-gray-500"
+            <div className="flex flex-wrap items-end justify-between gap-x-2.5 gap-y-1 min-w-0 max-w-full">
+              <div className="min-w-0 max-w-full flex-1">
+                <p
+                  className={`${
+                    isJumboEmoji
+                      ? "text-[34px] leading-tight tracking-wide animate-emoji-pop"
+                      : "text-[14.5px] leading-snug"
+                  } min-w-0 max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere] ${
+                    isOwner ? "text-white" : "text-gray-900 dark:text-gray-100"
+                  }`}
+                >
+                  {displayedText}
+                </p>
+                {isLongMessage && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setIsExpanded((prev) => !prev);
+                    }}
+                    className={`mt-1 text-xs font-semibold hover:underline ${
+                      isOwner
+                        ? "text-sky-100"
+                        : "text-blue-600 dark:text-sky-400"
                     }`}
-                    title={`Disappears after ${effectiveTimerMode}`}
-                  />
+                  >
+                    {isExpanded ? "Show less" : "Read more"}
+                  </button>
                 )}
+              </div>
+              <div className="flex items-center gap-1.5 ml-auto shrink-0">
                 {message.edited && (
                   <span
                     className={`text-[10px] italic ${
@@ -241,26 +459,39 @@ export default function Message({
                   </span>
                 )}
                 <span
-                  className={`text-[11px] whitespace-nowrap ${
+                  className={`text-[11px] whitespace-nowrap tabular-nums ${
                     isOwner ? "text-blue-100/90" : "text-gray-500 dark:text-gray-400"
                   }`}
                 >
                   {formatTime(message.timestamp) || "Sending"}
                 </span>
+                {hasDisappearTimer && (
+                  <span
+                    title={
+                      isAfterSeen
+                        ? isSeen
+                          ? `Disappears in ${remainingSec}s`
+                          : "Disappears after seen"
+                        : `Disappears after ${effectiveTimerMode}`
+                    }
+                    className={`inline-flex items-center gap-0.5 text-[10px] font-medium whitespace-nowrap tabular-nums ${
+                      isOwner
+                        ? "text-sky-100/95"
+                        : "text-blue-600/85 dark:text-sky-400/90"
+                    }`}
+                  >
+                    <Clock className="w-3 h-3 shrink-0" />
+                    {isAfterSeen && isSeen && remainingSec !== null && (
+                      <span>{remainingSec}s</span>
+                    )}
+                  </span>
+                )}
               </div>
             </div>
           )}
-
-          {/* Countdown progress bar for Seen & Disappear */}
-          {isAfterSeen && isSeen && (
-            <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-black/15 dark:bg-white/10">
-              <div
-                className="h-full bg-amber-400 transition-all duration-1000 ease-linear"
-                style={{ width: `${progressPct}%` }}
-              />
-            </div>
-          )}
         </div>
+
+        {!isOwner && quickActionBar}
       </div>
 
       {/* Inline Delete Confirmation */}
@@ -292,13 +523,17 @@ export default function Message({
         </div>
       )}
 
-      {/* Interactive Detailed Receipt, Edit & Delete Info */}
-      {isOwner && showDetails && !isEditing && !confirmDelete && (
+      {/* Interactive Detailed Receipt & Quick Actions (both own and received messages) */}
+      {showDetails && !isEditing && !confirmDelete && (
         <div className="mt-1 px-2.5 py-1 rounded-lg bg-gray-100 dark:bg-gray-800/90 border border-gray-200 dark:border-gray-700 text-[11px] text-gray-600 dark:text-gray-300 flex flex-wrap items-center gap-3 shadow-xs">
-          <span>Sent: {formatTime(message.timestamp) || "Pending"}</span>
-          {message.deliveredAt && <span>Delivered: {formatTime(message.deliveredAt)}</span>}
+          <span className="tabular-nums">
+            {isOwner ? "Sent" : "Received"}: {formatTime(message.timestamp) || "Pending"}
+          </span>
+          {isOwner && message.deliveredAt && (
+            <span className="tabular-nums">Delivered: {formatTime(message.deliveredAt)}</span>
+          )}
           {message.readAt && (
-            <span className="text-blue-600 dark:text-blue-400 font-medium">
+            <span className="text-blue-600 dark:text-blue-400 font-medium tabular-nums">
               Seen: {formatTime(message.readAt)}
             </span>
           )}
@@ -306,20 +541,52 @@ export default function Message({
             <>
               <button
                 type="button"
-                onClick={startEditing}
-                className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline font-medium"
+                onClick={handleReply}
+                className="inline-flex items-center gap-1 text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-sky-400 font-medium"
               >
-                <Pencil className="w-3 h-3" />
-                Edit
+                <Reply className="w-3 h-3" />
+                Reply
               </button>
               <button
                 type="button"
-                onClick={requestDelete}
-                className="inline-flex items-center gap-1 text-red-600 dark:text-red-400 hover:underline font-medium"
+                onClick={handleCopy}
+                className="inline-flex items-center gap-1 text-gray-700 dark:text-gray-200 hover:text-blue-600 dark:hover:text-sky-400 font-medium"
               >
-                <Trash2 className="w-3 h-3" />
-                Delete
+                <Copy className="w-3 h-3" />
+                Copy
               </button>
+              {isOwner ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={startEditing}
+                    className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 hover:underline font-medium"
+                  >
+                    <Pencil className="w-3 h-3" />
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={requestDelete}
+                    className="inline-flex items-center gap-1 text-red-600 dark:text-red-400 hover:underline font-medium"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                    Delete
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDeleteForMe?.(message);
+                  }}
+                  className="inline-flex items-center gap-1 text-red-600 dark:text-red-400 hover:underline font-medium"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  Delete for me
+                </button>
+              )}
             </>
           )}
         </div>
@@ -334,12 +601,12 @@ export default function Message({
               <span>Sending...</span>
             </>
           ) : isSeen ? (
-            <span className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-medium">
+            <span className="inline-flex items-center gap-1 text-blue-600 dark:text-blue-400 font-medium tabular-nums">
               <Eye className="w-3 h-3" />
               Seen{message.readAt ? ` • ${formatTime(message.readAt)}` : ""}
             </span>
           ) : isDelivered ? (
-            <span className="inline-flex items-center gap-1">
+            <span className="inline-flex items-center gap-1 tabular-nums">
               <CheckCheck className="w-3 h-3" />
               Delivered{message.deliveredAt ? ` • ${formatTime(message.deliveredAt)}` : ""}
             </span>
